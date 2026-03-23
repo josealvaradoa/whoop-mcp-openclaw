@@ -83,6 +83,7 @@ export function mountMcp(app: Express, provider: OAuthServerProvider): void {
 
   // POST /mcp — JSON-RPC requests
   app.post("/mcp", auth, async (req: Request, res: Response) => {
+    try {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
     // Route to existing session
@@ -136,18 +137,31 @@ export function mountMcp(app: Express, provider: OAuthServerProvider): void {
       });
       console.log(`New MCP session: ${transport.sessionId} (active: ${sessions.size})`);
     }
+    } catch (err) {
+      console.error("POST /mcp error:", err);
+      if (!res.headersSent) {
+        res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: String(err) }, id: null });
+      }
+    }
   });
 
   // GET /mcp — SSE stream for server-to-client notifications
   app.get("/mcp", auth, async (req: Request, res: Response) => {
-    const sessionId = req.headers["mcp-session-id"] as string | undefined;
-    if (!sessionId || !sessions.has(sessionId)) {
-      res.status(400).json({ error: "Invalid or missing session ID" });
-      return;
+    try {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+      if (!sessionId || !sessions.has(sessionId)) {
+        res.status(400).json({ error: "Invalid or missing session ID" });
+        return;
+      }
+      const session = sessions.get(sessionId)!;
+      session.lastActivity = Date.now();
+      await session.transport.handleRequest(req, res);
+    } catch (err) {
+      console.error("GET /mcp error:", err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: String(err) });
+      }
     }
-    const session = sessions.get(sessionId)!;
-    session.lastActivity = Date.now();
-    await session.transport.handleRequest(req, res);
   });
 
   // DELETE /mcp — close a session
