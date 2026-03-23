@@ -19,6 +19,8 @@ export interface Config {
   security: {
     encryptionSecret: string;
     mcpBearerToken: string;
+    mcpOAuthClientId: string;
+    mcpOAuthClientSecret: string;
   };
   server: {
     port: number;
@@ -127,6 +129,8 @@ function buildConfig(): Config {
     security: {
       encryptionSecret,
       mcpBearerToken: requireEnv("MCP_BEARER_TOKEN"),
+      mcpOAuthClientId: requireEnv("MCP_OAUTH_CLIENT_ID"),
+      mcpOAuthClientSecret: requireEnv("MCP_OAUTH_CLIENT_SECRET"),
     },
     server: {
       port: parseInt(process.env.PORT ?? "3000", 10),
