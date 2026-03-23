@@ -1,8 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import type { Express, Request, Response } from "express";
 import { randomUUID } from "node:crypto";
-import { bearerAuth } from "../server.js";
+import type { OAuthServerProvider } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 import { registerOverviewTool } from "./tools/overview.js";
 import { registerRecoveryTool } from "./tools/recovery.js";
 import { registerHrvTool } from "./tools/hrv.js";
@@ -45,7 +46,8 @@ function isInitializeRequest(body: unknown): boolean {
   return (body as { method?: string })?.method === "initialize";
 }
 
-export function mountMcp(app: Express): void {
+export function mountMcp(app: Express, provider: OAuthServerProvider): void {
+  const auth = requireBearerAuth({ verifier: provider });
   const sessions = new Map<string, Session>();
 
   // Evict expired sessions every 5 minutes
@@ -80,7 +82,7 @@ export function mountMcp(app: Express): void {
   }
 
   // POST /mcp — JSON-RPC requests
-  app.post("/mcp", bearerAuth, async (req: Request, res: Response) => {
+  app.post("/mcp", auth, async (req: Request, res: Response) => {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
     // Route to existing session
@@ -137,7 +139,7 @@ export function mountMcp(app: Express): void {
   });
 
   // GET /mcp — SSE stream for server-to-client notifications
-  app.get("/mcp", bearerAuth, async (req: Request, res: Response) => {
+  app.get("/mcp", auth, async (req: Request, res: Response) => {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
     if (!sessionId || !sessions.has(sessionId)) {
       res.status(400).json({ error: "Invalid or missing session ID" });
@@ -149,7 +151,7 @@ export function mountMcp(app: Express): void {
   });
 
   // DELETE /mcp — close a session
-  app.delete("/mcp", bearerAuth, async (req: Request, res: Response) => {
+  app.delete("/mcp", auth, async (req: Request, res: Response) => {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
     if (!sessionId || !sessions.has(sessionId)) {
       res.status(400).json({ error: "Invalid or missing session ID" });

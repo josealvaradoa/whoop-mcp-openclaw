@@ -1,30 +1,17 @@
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
-import { randomBytes, createHash } from "node:crypto";
+import { randomBytes } from "node:crypto";
+import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import type { OAuthServerProvider, AuthorizationParams } from "@modelcontextprotocol/sdk/server/auth/provider.js";
+import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
+import type { OAuthClientInformationFull, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
+import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { config } from "./config.js";
 import { buildAuthUrl, exchangeCodeForTokens, getTokens } from "./whoop/auth.js";
 
-// OAuth state store for Whoop: state -> creation timestamp
+// --- Whoop OAuth state store ---
 const pendingStates = new Map<string, number>();
 const STATE_TTL_MS = 10 * 60 * 1000;
-
-// MCP OAuth: authorization codes -> { clientId, redirectUri, codeChallenge, expiry }
-interface AuthCode {
-  clientId: string;
-  redirectUri: string;
-  codeChallenge?: string;
-  codeChallengeMethod?: string;
-  expiry: number;
-}
-const authCodes = new Map<string, AuthCode>();
-const AUTH_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-
-// MCP OAuth: access tokens -> expiry timestamp
-const accessTokens = new Map<string, number>();
-const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
-
-// Dynamic client registration store
-const registeredClients = new Map<string, { clientId: string; clientSecret: string }>();
 
 function cleanupStates(): void {
   const now = Date.now();
@@ -33,57 +20,130 @@ function cleanupStates(): void {
   }
 }
 
-// Cleanup expired tokens and codes every 10 minutes
+// --- MCP OAuth: in-memory stores ---
+const registeredClients = new Map<string, OAuthClientInformationFull>();
+const authorizationCodes = new Map<string, { clientId: string; codeChallenge: string; redirectUri: string }>();
+const accessTokenStore = new Map<string, { clientId: string; expiresAt: number }>();
+
+const ACCESS_TOKEN_TTL_S = 3600; // 1 hour
+
+// Cleanup expired tokens every 10 minutes
 setInterval(() => {
-  const now = Date.now();
-  for (const [token, expiry] of accessTokens) {
-    if (now > expiry) accessTokens.delete(token);
-  }
-  for (const [code, data] of authCodes) {
-    if (now > data.expiry) authCodes.delete(code);
+  const now = Math.floor(Date.now() / 1000);
+  for (const [token, data] of accessTokenStore) {
+    if (now > data.expiresAt) accessTokenStore.delete(token);
   }
 }, 10 * 60 * 1000);
 
-export function bearerAuth(req: Request, res: Response, next: NextFunction): void {
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer ")) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
+// --- OAuthRegisteredClientsStore implementation ---
+const clientsStore: OAuthRegisteredClientsStore = {
+  getClient(clientId: string) {
+    return registeredClients.get(clientId);
+  },
+  registerClient(clientInfo: Omit<OAuthClientInformationFull, "client_id" | "client_id_issued_at">) {
+    const clientId = randomBytes(16).toString("hex");
+    const full: OAuthClientInformationFull = {
+      ...clientInfo,
+      client_id: clientId,
+      client_id_issued_at: Math.floor(Date.now() / 1000),
+    };
+    registeredClients.set(clientId, full);
+    return full;
+  },
+};
 
-  const token = authHeader.slice(7);
+// --- OAuthServerProvider implementation ---
+export const oauthProvider: OAuthServerProvider = {
+  get clientsStore() {
+    return clientsStore;
+  },
 
-  // Accept static bearer token (curl/direct)
-  if (token === config.security.mcpBearerToken) {
-    next();
-    return;
-  }
+  async authorize(
+    client: OAuthClientInformationFull,
+    params: AuthorizationParams,
+    res: Response
+  ): Promise<void> {
+    // Single-user server: auto-approve authorization
+    const code = randomBytes(32).toString("hex");
+    authorizationCodes.set(code, {
+      clientId: client.client_id,
+      codeChallenge: params.codeChallenge,
+      redirectUri: params.redirectUri,
+    });
 
-  // Accept dynamically-issued OAuth access tokens (Claude Custom Connectors)
-  const expiry = accessTokens.get(token);
-  if (expiry && Date.now() < expiry) {
-    next();
-    return;
-  }
+    const url = new URL(params.redirectUri);
+    url.searchParams.set("code", code);
+    if (params.state) url.searchParams.set("state", params.state);
 
-  res.status(401).json({ error: "Unauthorized" });
-}
+    res.redirect(url.toString());
+  },
 
-function isValidClient(clientId: string, clientSecret: string): boolean {
-  // Check static config
-  if (
-    clientId === config.security.mcpOAuthClientId &&
-    clientSecret === config.security.mcpOAuthClientSecret
-  ) {
-    return true;
-  }
-  // Check dynamically registered clients
-  const registered = registeredClients.get(clientId);
-  return registered?.clientSecret === clientSecret;
-}
+  async challengeForAuthorizationCode(
+    _client: OAuthClientInformationFull,
+    authorizationCode: string
+  ): Promise<string> {
+    const data = authorizationCodes.get(authorizationCode);
+    if (!data) throw new Error("Invalid authorization code");
+    return data.codeChallenge;
+  },
+
+  async exchangeAuthorizationCode(
+    client: OAuthClientInformationFull,
+    authorizationCode: string,
+    _codeVerifier?: string,
+    _redirectUri?: string
+  ): Promise<OAuthTokens> {
+    const data = authorizationCodes.get(authorizationCode);
+    if (!data || data.clientId !== client.client_id) {
+      throw new Error("Invalid authorization code");
+    }
+    authorizationCodes.delete(authorizationCode);
+
+    const accessToken = randomBytes(32).toString("hex");
+    const expiresAt = Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_S;
+    accessTokenStore.set(accessToken, { clientId: client.client_id, expiresAt });
+
+    return {
+      access_token: accessToken,
+      token_type: "Bearer",
+      expires_in: ACCESS_TOKEN_TTL_S,
+    };
+  },
+
+  async exchangeRefreshToken(): Promise<OAuthTokens> {
+    throw new Error("Refresh tokens not supported");
+  },
+
+  async verifyAccessToken(token: string): Promise<AuthInfo> {
+    // Check dynamic tokens
+    const data = accessTokenStore.get(token);
+    if (data && Math.floor(Date.now() / 1000) < data.expiresAt) {
+      return {
+        token,
+        clientId: data.clientId,
+        scopes: [],
+        expiresAt: data.expiresAt,
+      };
+    }
+
+    // Check static bearer token
+    if (token === config.security.mcpBearerToken) {
+      return {
+        token,
+        clientId: "static",
+        scopes: [],
+      };
+    }
+
+    throw new Error("Invalid or expired token");
+  },
+};
 
 export function createApp(): express.Express {
   const app = express();
+
+  // Trust proxy (Railway runs behind a reverse proxy)
+  app.set("trust proxy", 1);
 
   // CORS
   app.use((_req: Request, res: Response, next: NextFunction) => {
@@ -101,150 +161,22 @@ export function createApp(): express.Express {
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
 
-  // OAuth 2.0 Authorization Server Metadata (RFC 8414)
-  app.get("/.well-known/oauth-authorization-server", (req: Request, res: Response) => {
-    const baseUrl = `${req.protocol}://${req.get("host")}`;
-    res.json({
-      issuer: baseUrl,
-      authorization_endpoint: `${baseUrl}/authorize`,
-      token_endpoint: `${baseUrl}/oauth/token`,
-      registration_endpoint: `${baseUrl}/oauth/register`,
-      token_endpoint_auth_methods_supported: ["client_secret_post"],
-      grant_types_supported: ["authorization_code"],
-      response_types_supported: ["code"],
-      code_challenge_methods_supported: ["S256"],
-    });
-  });
+  // MCP Auth Router (handles /.well-known/*, /authorize, /oauth/token, /oauth/register)
+  const issuerUrl = config.server.nodeEnv === "production"
+    ? new URL("https://whoop-mcp-openclaw-production.up.railway.app")
+    : new URL(`http://localhost:${config.server.port}`);
 
-  // Dynamic Client Registration (RFC 7591)
-  app.post("/oauth/register", (_req: Request, res: Response) => {
-    const clientId = randomBytes(16).toString("hex");
-    const clientSecret = randomBytes(32).toString("hex");
-    registeredClients.set(clientId, { clientId, clientSecret });
-
-    res.status(201).json({
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_types: ["authorization_code"],
-      response_types: ["code"],
-      token_endpoint_auth_method: "client_secret_post",
-    });
-  });
-
-  // OAuth 2.0 Authorization Endpoint
-  // Single-user server: auto-approve and redirect back with code
-  app.get("/authorize", (req: Request, res: Response) => {
-    const clientId = req.query.client_id as string;
-    const redirectUri = req.query.redirect_uri as string;
-    const state = req.query.state as string | undefined;
-    const codeChallenge = req.query.code_challenge as string | undefined;
-    const codeChallengeMethod = req.query.code_challenge_method as string | undefined;
-
-    if (!clientId || !redirectUri) {
-      res.status(400).send("Missing client_id or redirect_uri");
-      return;
-    }
-
-    // Generate authorization code
-    const code = randomBytes(32).toString("hex");
-    authCodes.set(code, {
-      clientId,
-      redirectUri,
-      codeChallenge,
-      codeChallengeMethod,
-      expiry: Date.now() + AUTH_CODE_TTL_MS,
-    });
-
-    const url = new URL(redirectUri);
-    url.searchParams.set("code", code);
-    if (state) url.searchParams.set("state", state);
-
-    res.redirect(url.toString());
-  });
-
-  // OAuth 2.0 Token Endpoint
-  app.post("/oauth/token", (req: Request, res: Response) => {
-    const grantType = req.body.grant_type;
-
-    if (grantType === "authorization_code") {
-      const code = req.body.code as string;
-      const clientId = req.body.client_id as string;
-      const clientSecret = req.body.client_secret as string | undefined;
-      const codeVerifier = req.body.code_verifier as string | undefined;
-
-      const authCode = authCodes.get(code);
-      if (!authCode || Date.now() > authCode.expiry) {
-        res.status(400).json({ error: "invalid_grant" });
-        return;
-      }
-
-      // Verify client
-      if (authCode.clientId !== clientId) {
-        res.status(400).json({ error: "invalid_grant" });
-        return;
-      }
-
-      // Verify PKCE if code_challenge was provided
-      if (authCode.codeChallenge && codeVerifier) {
-        const expected = createHash("sha256")
-          .update(codeVerifier)
-          .digest("base64url");
-        if (expected !== authCode.codeChallenge) {
-          res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
-          return;
-        }
-      }
-
-      // Verify client secret if provided (non-PKCE flow)
-      if (clientSecret && !isValidClient(clientId, clientSecret)) {
-        res.status(401).json({ error: "invalid_client" });
-        return;
-      }
-
-      authCodes.delete(code);
-
-      const token = randomBytes(32).toString("hex");
-      const expiresIn = Math.floor(ACCESS_TOKEN_TTL_MS / 1000);
-      accessTokens.set(token, Date.now() + ACCESS_TOKEN_TTL_MS);
-
-      res.json({
-        access_token: token,
-        token_type: "Bearer",
-        expires_in: expiresIn,
-      });
-      return;
-    }
-
-    if (grantType === "client_credentials") {
-      const clientId = req.body.client_id as string;
-      const clientSecret = req.body.client_secret as string;
-
-      if (!isValidClient(clientId, clientSecret)) {
-        res.status(401).json({ error: "invalid_client" });
-        return;
-      }
-
-      const token = randomBytes(32).toString("hex");
-      const expiresIn = Math.floor(ACCESS_TOKEN_TTL_MS / 1000);
-      accessTokens.set(token, Date.now() + ACCESS_TOKEN_TTL_MS);
-
-      res.json({
-        access_token: token,
-        token_type: "Bearer",
-        expires_in: expiresIn,
-      });
-      return;
-    }
-
-    res.status(400).json({ error: "unsupported_grant_type" });
-  });
+  app.use(mcpAuthRouter({
+    provider: oauthProvider,
+    issuerUrl,
+  }));
 
   // Health check
   app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok" });
   });
 
-  // Auth status
+  // Whoop auth status
   app.get("/auth/status", (_req: Request, res: Response) => {
     const tokens = getTokens();
     if (!tokens) {
