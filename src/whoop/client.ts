@@ -48,8 +48,7 @@ async function fetchAllPages<T>(
   const allRecords: T[] = [];
   const queryParams = { ...params };
 
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
+  for (;;) {
     const page = await fetchWhoop<PaginatedResponse<T>>(endpoint, queryParams);
     allRecords.push(...page.records);
 

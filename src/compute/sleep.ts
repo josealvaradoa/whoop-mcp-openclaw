@@ -63,16 +63,9 @@ export function computeSleepTrend(sleepDays: SleepDayData[]) {
   const sleepDebtCumulative =
     Math.round(last7.reduce((sum, d) => sum + (d.duration_hrs - target), 0) * 10) / 10;
 
-  // Consistency: 1.0 - normalized stddev of sleep start times (using hour of day)
+  // Consistency: 1.0 - normalized stddev of sleep durations as proxy
   let consistencyScore = 1.0;
-  if (sleepDays.length >= 2) {
-    const startHours = sleepDays.slice(0, 7).map((d) => {
-      // Parse start time hour as fractional hours
-      const parts = d.date.split("T");
-      // We only have the date, so approximate from the data ordering
-      return 0; // Will use actual start times from raw data if available
-    });
-    // Use duration stddev as a proxy for consistency
+  if (durations7d.length >= 2) {
     const durationStddev = stddev(durations7d);
     const normalized = avgDuration7d > 0 ? durationStddev / avgDuration7d : 0;
     consistencyScore = Math.round(Math.max(0, 1.0 - normalized) * 100) / 100;

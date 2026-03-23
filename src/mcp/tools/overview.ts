@@ -4,7 +4,6 @@ import { config } from "../../config.js";
 import {
   getReadiness,
   getRecommendation,
-  mean,
   computeBaselineComparison,
 } from "../../compute/recovery.js";
 import { mapSleepToDay } from "../../compute/sleep.js";
