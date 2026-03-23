@@ -1,0 +1,8 @@
+node_modules/
+.git/
+data/
+.env
+src/
+*.md
+.claude/
+test-curls.sh
