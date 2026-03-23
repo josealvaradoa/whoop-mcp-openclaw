@@ -36,8 +36,9 @@ export interface Cycle {
 // Recovery
 export interface Recovery {
   cycle_id: number;
-  sleep_id: number;
+  sleep_id: string;
   user_id: number;
+  score_state: string;
   score: {
     recovery_score: number;
     resting_heart_rate: number;
@@ -49,7 +50,7 @@ export interface Recovery {
 
 // Sleep
 export interface Sleep {
-  id: number;
+  id: string;
   user_id: number;
   start: string;
   end: string;
@@ -78,18 +79,20 @@ export interface Sleep {
 
 // Workout
 export interface Workout {
-  id: number;
+  id: string;
   user_id: number;
   start: string;
   end: string;
-  sport_id: number;
+  sport_id?: number;
+  sport_name: string;
+  score_state: string;
   score: {
     strain: number;
     average_heart_rate: number;
     max_heart_rate: number;
     kilojoule: number;
     percent_recorded: number;
-    zone_duration: {
+    zone_durations: {
       zone_zero_milli: number;
       zone_one_milli: number;
       zone_two_milli: number;

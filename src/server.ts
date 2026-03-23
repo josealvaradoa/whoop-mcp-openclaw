@@ -161,10 +161,8 @@ export function createApp(): express.Express {
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
 
-  // MCP Auth Router (handles /.well-known/*, /authorize, /oauth/token, /oauth/register)
-  const issuerUrl = config.server.nodeEnv === "production"
-    ? new URL("https://whoop-mcp-openclaw-production.up.railway.app")
-    : new URL(`http://localhost:${config.server.port}`);
+  // MCP Auth Router (handles /.well-known/*, /authorize, /token, /register)
+  const issuerUrl = new URL(config.server.publicUrl);
 
   app.use(mcpAuthRouter({
     provider: oauthProvider,

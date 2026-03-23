@@ -82,7 +82,7 @@ export async function getProfile(): Promise<UserProfile> {
   const cached = cache.get(cacheKey);
   if (cached) return cached as UserProfile;
 
-  const data = await fetchWhoop<UserProfile>("/v1/user/profile/basic");
+  const data = await fetchWhoop<UserProfile>("/v2/user/profile/basic");
   cache.set(cacheKey, data, cacheTtlSeconds());
   return data;
 }
@@ -92,7 +92,7 @@ export async function getBodyMeasurements(): Promise<BodyMeasurement> {
   const cached = cache.get(cacheKey);
   if (cached) return cached as BodyMeasurement;
 
-  const data = await fetchWhoop<BodyMeasurement>("/v1/user/measurement/body");
+  const data = await fetchWhoop<BodyMeasurement>("/v2/user/measurement/body");
   cache.set(cacheKey, data, cacheTtlSeconds());
   return data;
 }
@@ -102,7 +102,7 @@ export async function getCycles(start: string, end: string): Promise<Cycle[]> {
   const cached = cache.get(cacheKey);
   if (cached) return cached as Cycle[];
 
-  const data = await fetchAllPages<Cycle>("/v1/cycle", { start, end });
+  const data = await fetchAllPages<Cycle>("/v2/cycle", { start, end });
   cache.set(cacheKey, data, cacheTtlSeconds());
   return data;
 }
@@ -115,7 +115,7 @@ export async function getRecoveryCollection(
   const cached = cache.get(cacheKey);
   if (cached) return cached as Recovery[];
 
-  const data = await fetchAllPages<Recovery>("/v1/recovery", { start, end });
+  const data = await fetchAllPages<Recovery>("/v2/recovery", { start, end });
   cache.set(cacheKey, data, cacheTtlSeconds());
   return data;
 }
@@ -128,7 +128,7 @@ export async function getSleepCollection(
   const cached = cache.get(cacheKey);
   if (cached) return cached as Sleep[];
 
-  const data = await fetchAllPages<Sleep>("/v1/activity/sleep", { start, end });
+  const data = await fetchAllPages<Sleep>("/v2/activity/sleep", { start, end });
   cache.set(cacheKey, data, cacheTtlSeconds());
   return data;
 }
@@ -141,7 +141,7 @@ export async function getWorkoutCollection(
   const cached = cache.get(cacheKey);
   if (cached) return cached as Workout[];
 
-  const data = await fetchAllPages<Workout>("/v1/activity/workout", { start, end });
+  const data = await fetchAllPages<Workout>("/v2/activity/workout", { start, end });
   cache.set(cacheKey, data, cacheTtlSeconds());
   return data;
 }

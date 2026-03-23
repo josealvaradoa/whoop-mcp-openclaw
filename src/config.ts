@@ -25,6 +25,7 @@ export interface Config {
   server: {
     port: number;
     nodeEnv: string;
+    publicUrl: string;
   };
   athlete: {
     name: string;
@@ -135,6 +136,7 @@ function buildConfig(): Config {
     server: {
       port: parseInt(process.env.PORT ?? "3000", 10),
       nodeEnv: process.env.NODE_ENV ?? "development",
+      publicUrl: process.env.PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? "3000"}`,
     },
     athlete,
     race,

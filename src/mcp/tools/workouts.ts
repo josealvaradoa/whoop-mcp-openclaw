@@ -1,7 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { daysAgo, today, getWorkoutCollection } from "../../whoop/client.js";
-import { getSportName } from "../../whoop/types.js";
 
 const MILLI_TO_MIN = 1 / (1000 * 60);
 
@@ -14,32 +13,33 @@ export function registerWorkoutsTool(server: McpServer): void {
       sport: z.string().optional().describe("Filter by sport name (e.g. 'running', 'cycling', 'swimming'). Optional."),
     },
     async ({ days, sport }) => {
-      let workouts = await getWorkoutCollection(daysAgo(days), today());
+      const workouts = await getWorkoutCollection(daysAgo(days), today());
 
-      // Map to readable format
-      const mapped = workouts.map((w) => {
-        const zd = w.score.zone_duration;
-        const durationMin = Math.round(
-          (new Date(w.end).getTime() - new Date(w.start).getTime()) / (1000 * 60)
-        );
-        return {
-          date: w.start.split("T")[0],
-          sport: getSportName(w.sport_id),
-          sport_id: w.sport_id,
-          strain: w.score.strain,
-          duration_min: durationMin,
-          avg_hr: w.score.average_heart_rate,
-          max_hr: w.score.max_heart_rate,
-          calories: Math.round(w.score.kilojoule * 0.239006),
-          hr_zones_minutes: {
-            zone1: Math.round(zd.zone_one_milli * MILLI_TO_MIN),
-            zone2: Math.round(zd.zone_two_milli * MILLI_TO_MIN),
-            zone3: Math.round(zd.zone_three_milli * MILLI_TO_MIN),
-            zone4: Math.round(zd.zone_four_milli * MILLI_TO_MIN),
-            zone5: Math.round(zd.zone_five_milli * MILLI_TO_MIN),
-          },
-        };
-      });
+      // Map to readable format — filter out unscored workouts
+      const mapped = workouts
+        .filter((w) => w.score_state === "SCORED" && w.score)
+        .map((w) => {
+          const zd = w.score.zone_durations;
+          const durationMin = Math.round(
+            (new Date(w.end).getTime() - new Date(w.start).getTime()) / (1000 * 60)
+          );
+          return {
+            date: w.start.split("T")[0],
+            sport: w.sport_name,
+            strain: w.score.strain,
+            duration_min: durationMin,
+            avg_hr: w.score.average_heart_rate,
+            max_hr: w.score.max_heart_rate,
+            calories: Math.round(w.score.kilojoule * 0.239006),
+            hr_zones_minutes: {
+              zone1: Math.round(zd.zone_one_milli * MILLI_TO_MIN),
+              zone2: Math.round(zd.zone_two_milli * MILLI_TO_MIN),
+              zone3: Math.round(zd.zone_three_milli * MILLI_TO_MIN),
+              zone4: Math.round(zd.zone_four_milli * MILLI_TO_MIN),
+              zone5: Math.round(zd.zone_five_milli * MILLI_TO_MIN),
+            },
+          };
+        });
 
       // Filter by sport if specified
       const filtered = sport
