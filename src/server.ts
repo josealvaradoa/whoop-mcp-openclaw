@@ -35,7 +35,8 @@ function cleanupStates(): void {
 
 // --- MCP OAuth: in-memory stores ---
 const registeredClients = new Map<string, OAuthClientInformationFull>();
-const authorizationCodes = new Map<string, { clientId: string; codeChallenge: string; redirectUri: string }>();
+const authorizationCodes = new Map<string, { clientId: string; codeChallenge: string; redirectUri: string; createdAt: number }>();
+const AUTH_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const accessTokenStore = new Map<string, { clientId: string; expiresAt: number }>();
 const refreshTokenStore = new Map<string, { clientId: string; expiresAt: number }>();
 
@@ -50,6 +51,10 @@ setInterval(() => {
   }
   for (const [token, data] of refreshTokenStore) {
     if (now > data.expiresAt) refreshTokenStore.delete(token);
+  }
+  const nowMs = Date.now();
+  for (const [code, data] of authorizationCodes) {
+    if (nowMs - data.createdAt > AUTH_CODE_TTL_MS) authorizationCodes.delete(code);
   }
 }, 10 * 60 * 1000);
 
@@ -88,6 +93,7 @@ export const oauthProvider: OAuthServerProvider = {
         clientId: client.client_id,
         codeChallenge: params.codeChallenge,
         redirectUri: params.redirectUri,
+        createdAt: Date.now(),
       });
 
       const url = new URL(params.redirectUri);
@@ -289,6 +295,7 @@ export function createApp(): express.Express {
           clientId: mcpAuth.clientId,
           codeChallenge: mcpAuth.codeChallenge,
           redirectUri: mcpAuth.redirectUri,
+          createdAt: Date.now(),
         });
 
         const url = new URL(mcpAuth.redirectUri);

@@ -18,12 +18,14 @@ export function registerRecoveryTool(server: McpServer): void {
 
       const cycleDateMap = new Map(cycles.map((c) => [c.id, c.start.split("T")[0]]));
 
-      const dailyRecovery = recoveries.map((r) => ({
-        date: cycleDateMap.get(r.cycle_id) ?? "unknown",
-        score: r.score.recovery_score,
-        hrv_rmssd: r.score.hrv_rmssd_milli,
-        resting_heart_rate: r.score.resting_heart_rate,
-      }));
+      const dailyRecovery = recoveries
+        .filter((r) => cycleDateMap.has(r.cycle_id))
+        .map((r) => ({
+          date: cycleDateMap.get(r.cycle_id)!,
+          score: r.score.recovery_score,
+          hrv_rmssd: r.score.hrv_rmssd_milli,
+          resting_heart_rate: r.score.resting_heart_rate,
+        }));
 
       const computed = computeRecoveryTrend(recoveries);
 

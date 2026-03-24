@@ -18,10 +18,12 @@ export function registerHrvTool(server: McpServer): void {
 
       const cycleDateMap = new Map(cycles.map((c) => [c.id, c.start.split("T")[0]]));
 
-      const dailyHrv = recoveries.map((r) => ({
-        date: cycleDateMap.get(r.cycle_id) ?? "unknown",
-        hrv_rmssd: r.score.hrv_rmssd_milli,
-      }));
+      const dailyHrv = recoveries
+        .filter((r) => cycleDateMap.has(r.cycle_id))
+        .map((r) => ({
+          date: cycleDateMap.get(r.cycle_id)!,
+          hrv_rmssd: r.score.hrv_rmssd_milli,
+        }));
 
       const computed = computeHrvTrend(recoveries);
 
