@@ -49,20 +49,13 @@ function dbGetClient(clientId: string): OAuthClientInformationFull | undefined {
     | { client_info: string }
     | undefined;
   if (!row) return undefined;
-  const parsed = JSON.parse(row.client_info);
-  // Reconstruct redirect_uris as URL objects (JSON serialisation turns them into strings)
-  if (Array.isArray(parsed.redirect_uris)) {
-    parsed.redirect_uris = parsed.redirect_uris.map((u: string) => new URL(u));
-  }
-  return parsed as OAuthClientInformationFull;
+  return JSON.parse(row.client_info) as OAuthClientInformationFull;
 }
 
 function dbRegisterClient(clientInfo: OAuthClientInformationFull): void {
   const db = getDb();
-  // Serialise redirect_uris as plain strings for JSON storage
-  const toStore = { ...clientInfo, redirect_uris: clientInfo.redirect_uris?.map((u) => u.toString()) };
   db.prepare("INSERT OR REPLACE INTO mcp_clients (client_id, client_info) VALUES (?, ?)")
-    .run(clientInfo.client_id, JSON.stringify(toStore));
+    .run(clientInfo.client_id, JSON.stringify(clientInfo));
 }
 
 function dbGetAccessToken(token: string): { clientId: string; expiresAt: number } | undefined {
