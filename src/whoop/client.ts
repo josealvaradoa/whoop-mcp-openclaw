@@ -51,12 +51,12 @@ async function fetchAllPages<T>(
   const allRecords: T[] = [];
   const queryParams = { ...params };
 
-  for (;;) {
+  for (let page_num = 0; page_num < 50; page_num++) {
     const page = await fetchWhoop<PaginatedResponse<T>>(endpoint, queryParams);
     allRecords.push(...page.records);
 
-    if (!page.next_token) break;
-    queryParams.next_token = page.next_token;
+    if (!page.next_token || page.records.length === 0) break;
+    queryParams.nextToken = page.next_token;
   }
 
   return allRecords;
