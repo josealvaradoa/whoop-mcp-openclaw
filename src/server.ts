@@ -8,6 +8,7 @@ import type { OAuthClientInformationFull, OAuthTokens } from "@modelcontextproto
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { config } from "./config.js";
 import { buildAuthUrl, exchangeCodeForTokens, getTokens } from "./whoop/auth.js";
+import { getDb } from "./db/connection.js";
 
 // --- Whoop OAuth state store ---
 const pendingStates = new Map<string, number>();
@@ -33,25 +34,76 @@ function cleanupStates(): void {
   }
 }
 
-// --- MCP OAuth: in-memory stores ---
-const registeredClients = new Map<string, OAuthClientInformationFull>();
+// --- MCP OAuth: short-lived state in-memory, persistent state in SQLite ---
 const authorizationCodes = new Map<string, { clientId: string; codeChallenge: string; redirectUri: string; createdAt: number }>();
 const AUTH_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const accessTokenStore = new Map<string, { clientId: string; expiresAt: number }>();
-const refreshTokenStore = new Map<string, { clientId: string; expiresAt: number }>();
 
 const ACCESS_TOKEN_TTL_S = 3600; // 1 hour
 const REFRESH_TOKEN_TTL_S = 30 * 24 * 3600; // 30 days
 
+// --- SQLite-backed MCP token helpers ---
+
+function dbGetClient(clientId: string): OAuthClientInformationFull | undefined {
+  const db = getDb();
+  const row = db.prepare("SELECT client_info FROM mcp_clients WHERE client_id = ?").get(clientId) as
+    | { client_info: string }
+    | undefined;
+  if (!row) return undefined;
+  const parsed = JSON.parse(row.client_info);
+  // Reconstruct redirect_uris as URL objects (JSON serialisation turns them into strings)
+  if (Array.isArray(parsed.redirect_uris)) {
+    parsed.redirect_uris = parsed.redirect_uris.map((u: string) => new URL(u));
+  }
+  return parsed as OAuthClientInformationFull;
+}
+
+function dbRegisterClient(clientInfo: OAuthClientInformationFull): void {
+  const db = getDb();
+  // Serialise redirect_uris as plain strings for JSON storage
+  const toStore = { ...clientInfo, redirect_uris: clientInfo.redirect_uris?.map((u) => u.toString()) };
+  db.prepare("INSERT OR REPLACE INTO mcp_clients (client_id, client_info) VALUES (?, ?)")
+    .run(clientInfo.client_id, JSON.stringify(toStore));
+}
+
+function dbGetAccessToken(token: string): { clientId: string; expiresAt: number } | undefined {
+  const db = getDb();
+  const row = db.prepare("SELECT client_id, expires_at FROM mcp_access_tokens WHERE token = ?").get(token) as
+    | { client_id: string; expires_at: number }
+    | undefined;
+  return row ? { clientId: row.client_id, expiresAt: row.expires_at } : undefined;
+}
+
+function dbSetAccessToken(token: string, clientId: string, expiresAt: number): void {
+  const db = getDb();
+  db.prepare("INSERT OR REPLACE INTO mcp_access_tokens (token, client_id, expires_at) VALUES (?, ?, ?)")
+    .run(token, clientId, expiresAt);
+}
+
+function dbGetRefreshToken(token: string): { clientId: string; expiresAt: number } | undefined {
+  const db = getDb();
+  const row = db.prepare("SELECT client_id, expires_at FROM mcp_refresh_tokens WHERE token = ?").get(token) as
+    | { client_id: string; expires_at: number }
+    | undefined;
+  return row ? { clientId: row.client_id, expiresAt: row.expires_at } : undefined;
+}
+
+function dbSetRefreshToken(token: string, clientId: string, expiresAt: number): void {
+  const db = getDb();
+  db.prepare("INSERT OR REPLACE INTO mcp_refresh_tokens (token, client_id, expires_at) VALUES (?, ?, ?)")
+    .run(token, clientId, expiresAt);
+}
+
+function dbDeleteRefreshToken(token: string): void {
+  const db = getDb();
+  db.prepare("DELETE FROM mcp_refresh_tokens WHERE token = ?").run(token);
+}
+
 // Cleanup expired tokens every 10 minutes
 setInterval(() => {
   const now = Math.floor(Date.now() / 1000);
-  for (const [token, data] of accessTokenStore) {
-    if (now > data.expiresAt) accessTokenStore.delete(token);
-  }
-  for (const [token, data] of refreshTokenStore) {
-    if (now > data.expiresAt) refreshTokenStore.delete(token);
-  }
+  const db = getDb();
+  db.prepare("DELETE FROM mcp_access_tokens WHERE expires_at < ?").run(now);
+  db.prepare("DELETE FROM mcp_refresh_tokens WHERE expires_at < ?").run(now);
   const nowMs = Date.now();
   for (const [code, data] of authorizationCodes) {
     if (nowMs - data.createdAt > AUTH_CODE_TTL_MS) authorizationCodes.delete(code);
@@ -61,9 +113,9 @@ setInterval(() => {
 // --- OAuthRegisteredClientsStore implementation ---
 const clientsStore: OAuthRegisteredClientsStore = {
   getClient(clientId: string) {
-    const found = registeredClients.has(clientId);
-    console.log(`[auth] getClient ${clientId.slice(0, 8)}… → ${found ? "found" : "NOT FOUND"}`);
-    return registeredClients.get(clientId);
+    const client = dbGetClient(clientId);
+    console.log(`[auth] getClient ${clientId.slice(0, 8)}… → ${client ? "found" : "NOT FOUND"}`);
+    return client;
   },
   registerClient(clientInfo: Omit<OAuthClientInformationFull, "client_id" | "client_id_issued_at">) {
     const clientId = randomBytes(16).toString("hex");
@@ -72,8 +124,8 @@ const clientsStore: OAuthRegisteredClientsStore = {
       client_id: clientId,
       client_id_issued_at: Math.floor(Date.now() / 1000),
     };
-    registeredClients.set(clientId, full);
-    console.log(`[auth] registerClient → ${clientId.slice(0, 8)}… (total: ${registeredClients.size})`);
+    dbRegisterClient(full);
+    console.log(`[auth] registerClient → ${clientId.slice(0, 8)}…`);
     return full;
   },
 };
@@ -154,8 +206,8 @@ export const oauthProvider: OAuthServerProvider = {
     const accessToken = randomBytes(32).toString("hex");
     const refreshToken = randomBytes(32).toString("hex");
     const now = Math.floor(Date.now() / 1000);
-    accessTokenStore.set(accessToken, { clientId: client.client_id, expiresAt: now + ACCESS_TOKEN_TTL_S });
-    refreshTokenStore.set(refreshToken, { clientId: client.client_id, expiresAt: now + REFRESH_TOKEN_TTL_S });
+    dbSetAccessToken(accessToken, client.client_id, now + ACCESS_TOKEN_TTL_S);
+    dbSetRefreshToken(refreshToken, client.client_id, now + REFRESH_TOKEN_TTL_S);
 
     return {
       access_token: accessToken,
@@ -169,24 +221,24 @@ export const oauthProvider: OAuthServerProvider = {
     client: OAuthClientInformationFull,
     refreshToken: string
   ): Promise<OAuthTokens> {
-    const data = refreshTokenStore.get(refreshToken);
+    const data = dbGetRefreshToken(refreshToken);
     if (!data || data.clientId !== client.client_id) {
-      console.error(`[auth] exchangeRefreshToken FAILED — token ${data ? "found but clientId mismatch" : "NOT FOUND"} (stored: ${refreshTokenStore.size})`);
+      console.error(`[auth] exchangeRefreshToken FAILED — token ${data ? "found but clientId mismatch" : "NOT FOUND"}`);
       throw new Error("Invalid refresh token");
     }
     const now = Math.floor(Date.now() / 1000);
     if (now > data.expiresAt) {
-      refreshTokenStore.delete(refreshToken);
+      dbDeleteRefreshToken(refreshToken);
       throw new Error("Refresh token expired");
     }
 
     // Rotate: delete old, issue new
-    refreshTokenStore.delete(refreshToken);
+    dbDeleteRefreshToken(refreshToken);
 
     const newAccessToken = randomBytes(32).toString("hex");
     const newRefreshToken = randomBytes(32).toString("hex");
-    accessTokenStore.set(newAccessToken, { clientId: client.client_id, expiresAt: now + ACCESS_TOKEN_TTL_S });
-    refreshTokenStore.set(newRefreshToken, { clientId: client.client_id, expiresAt: now + REFRESH_TOKEN_TTL_S });
+    dbSetAccessToken(newAccessToken, client.client_id, now + ACCESS_TOKEN_TTL_S);
+    dbSetRefreshToken(newRefreshToken, client.client_id, now + REFRESH_TOKEN_TTL_S);
 
     return {
       access_token: newAccessToken,
@@ -197,8 +249,8 @@ export const oauthProvider: OAuthServerProvider = {
   },
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    // Check dynamic tokens
-    const data = accessTokenStore.get(token);
+    // Check dynamic tokens from SQLite
+    const data = dbGetAccessToken(token);
     if (data && Math.floor(Date.now() / 1000) < data.expiresAt) {
       console.log(`[auth] verifyAccessToken → dynamic token valid (client ${data.clientId.slice(0, 8)}…)`);
       return {
@@ -219,7 +271,7 @@ export const oauthProvider: OAuthServerProvider = {
       };
     }
 
-    console.error(`[auth] verifyAccessToken REJECTED — token not in accessTokenStore (${accessTokenStore.size} stored) and not static`);
+    console.error(`[auth] verifyAccessToken REJECTED — token not found in DB and not static`);
     throw new Error("Invalid or expired token");
   },
 };

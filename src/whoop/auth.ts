@@ -141,27 +141,44 @@ async function doRefreshAccessToken(): Promise<string> {
     throw new Error("No refresh token available. Please re-authorize at /auth/whoop");
   }
 
-  const response = await fetch(WHOOP_TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: tokens.refreshToken,
-      client_id: config.whoop.clientId,
-      client_secret: config.whoop.clientSecret,
-    }),
-  });
+  let response: globalThis.Response;
+  try {
+    response = await fetch(WHOOP_TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: tokens.refreshToken,
+        client_id: config.whoop.clientId,
+        client_secret: config.whoop.clientSecret,
+      }),
+    });
+  } catch (networkErr) {
+    // Network error (DNS, timeout, etc.) — do NOT delete tokens, they may still be valid
+    console.error(`[whoop-auth] Token refresh network error (tokens preserved):`, networkErr);
+    throw new Error("Token refresh failed due to network error — will retry on next request");
+  }
 
   if (!response.ok) {
     const body = await response.text();
     console.error(`[whoop-auth] Token refresh FAILED (${response.status}): ${body}`);
-    cachedAccessToken = null;
-    cachedExpiresAt = null;
-    // Clear stale tokens from DB so the next check gives a clean "no tokens" state
-    const db = getDb();
-    db.prepare("DELETE FROM tokens WHERE id = 1").run();
+
+    // Only delete tokens for definitive auth failures (token revoked/invalid)
+    if (response.status === 400 || response.status === 401 || response.status === 403) {
+      console.warn(`[whoop-auth] Definitive auth failure (${response.status}) — clearing stored tokens`);
+      cachedAccessToken = null;
+      cachedExpiresAt = null;
+      const db = getDb();
+      db.prepare("DELETE FROM tokens WHERE id = 1").run();
+      throw new Error(
+        `Token refresh failed (${response.status}). Please re-authorize at /auth/whoop`
+      );
+    }
+
+    // Transient error (5xx, rate limit, etc.) — preserve tokens for retry
+    console.warn(`[whoop-auth] Transient error (${response.status}) — tokens preserved for retry`);
     throw new Error(
-      `Token refresh failed (${response.status}). Please re-authorize at /auth/whoop`
+      `Token refresh failed (${response.status}) — will retry on next request`
     );
   }
 

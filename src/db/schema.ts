@@ -21,4 +21,28 @@ export function initSchema(db: Database.Database): void {
       ttl_seconds INTEGER NOT NULL
     )
   `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS mcp_clients (
+      client_id TEXT PRIMARY KEY,
+      client_info TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS mcp_access_tokens (
+      token TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL,
+      expires_at INTEGER NOT NULL
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS mcp_refresh_tokens (
+      token TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL,
+      expires_at INTEGER NOT NULL
+    )
+  `);
 }
