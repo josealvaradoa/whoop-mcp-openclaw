@@ -61,6 +61,8 @@ setInterval(() => {
 // --- OAuthRegisteredClientsStore implementation ---
 const clientsStore: OAuthRegisteredClientsStore = {
   getClient(clientId: string) {
+    const found = registeredClients.has(clientId);
+    console.log(`[auth] getClient ${clientId.slice(0, 8)}… → ${found ? "found" : "NOT FOUND"}`);
     return registeredClients.get(clientId);
   },
   registerClient(clientInfo: Omit<OAuthClientInformationFull, "client_id" | "client_id_issued_at">) {
@@ -71,6 +73,7 @@ const clientsStore: OAuthRegisteredClientsStore = {
       client_id_issued_at: Math.floor(Date.now() / 1000),
     };
     registeredClients.set(clientId, full);
+    console.log(`[auth] registerClient → ${clientId.slice(0, 8)}… (total: ${registeredClients.size})`);
     return full;
   },
 };
@@ -86,6 +89,7 @@ export const oauthProvider: OAuthServerProvider = {
     params: AuthorizationParams,
     res: Response
   ): Promise<void> {
+    console.log(`[auth] authorize called for client ${client.client_id.slice(0, 8)}…, redirectUri=${params.redirectUri}`);
     // If Whoop tokens already exist, auto-approve immediately
     if (getTokens()) {
       const code = randomBytes(32).toString("hex");
@@ -100,11 +104,13 @@ export const oauthProvider: OAuthServerProvider = {
       url.searchParams.set("code", code);
       if (params.state) url.searchParams.set("state", params.state);
 
+      console.log(`[auth] Whoop tokens exist → auto-approve, redirecting to Claude`);
       res.redirect(url.toString());
       return;
     }
 
     // No Whoop tokens — chain to Whoop OAuth, then complete MCP auth on callback
+    console.log(`[auth] No Whoop tokens → chaining to Whoop OAuth`);
     cleanupStates();
     const whoopState = randomBytes(16).toString("hex");
     pendingStates.set(whoopState, Date.now());
@@ -116,6 +122,7 @@ export const oauthProvider: OAuthServerProvider = {
       createdAt: Date.now(),
     });
 
+    console.log(`[auth] pendingMcpAuth stored for state ${whoopState.slice(0, 8)}…, pendingStates size=${pendingStates.size}, pendingMcpAuth size=${pendingMcpAuth.size}`);
     res.redirect(buildAuthUrl(whoopState));
   },
 
@@ -124,6 +131,7 @@ export const oauthProvider: OAuthServerProvider = {
     authorizationCode: string
   ): Promise<string> {
     const data = authorizationCodes.get(authorizationCode);
+    console.log(`[auth] challengeForAuthorizationCode → ${data ? "found" : "NOT FOUND"} (stored codes: ${authorizationCodes.size})`);
     if (!data) throw new Error("Invalid authorization code");
     return data.codeChallenge;
   },
@@ -136,8 +144,10 @@ export const oauthProvider: OAuthServerProvider = {
   ): Promise<OAuthTokens> {
     const data = authorizationCodes.get(authorizationCode);
     if (!data || data.clientId !== client.client_id) {
+      console.error(`[auth] exchangeAuthorizationCode FAILED — code ${data ? "found but clientId mismatch" : "NOT FOUND"}`);
       throw new Error("Invalid authorization code");
     }
+    console.log(`[auth] exchangeAuthorizationCode → success, issuing access + refresh tokens`);
     authorizationCodes.delete(authorizationCode);
 
     const accessToken = randomBytes(32).toString("hex");
@@ -160,6 +170,7 @@ export const oauthProvider: OAuthServerProvider = {
   ): Promise<OAuthTokens> {
     const data = refreshTokenStore.get(refreshToken);
     if (!data || data.clientId !== client.client_id) {
+      console.error(`[auth] exchangeRefreshToken FAILED — token ${data ? "found but clientId mismatch" : "NOT FOUND"} (stored: ${refreshTokenStore.size})`);
       throw new Error("Invalid refresh token");
     }
     const now = Math.floor(Date.now() / 1000);
@@ -188,6 +199,7 @@ export const oauthProvider: OAuthServerProvider = {
     // Check dynamic tokens
     const data = accessTokenStore.get(token);
     if (data && Math.floor(Date.now() / 1000) < data.expiresAt) {
+      console.log(`[auth] verifyAccessToken → dynamic token valid (client ${data.clientId.slice(0, 8)}…)`);
       return {
         token,
         clientId: data.clientId,
@@ -198,6 +210,7 @@ export const oauthProvider: OAuthServerProvider = {
 
     // Check static bearer token
     if (token === config.security.mcpBearerToken) {
+      console.log(`[auth] verifyAccessToken → static bearer token`);
       return {
         token,
         clientId: "static",
@@ -205,6 +218,7 @@ export const oauthProvider: OAuthServerProvider = {
       };
     }
 
+    console.error(`[auth] verifyAccessToken REJECTED — token not in accessTokenStore (${accessTokenStore.size} stored) and not static`);
     throw new Error("Invalid or expired token");
   },
 };
@@ -268,24 +282,30 @@ export function createApp(): express.Express {
 
   // Whoop OAuth callback
   app.get("/auth/whoop/callback", async (req: Request, res: Response) => {
+    console.log(`[callback] /auth/whoop/callback hit — query: code=${req.query.code ? "present" : "MISSING"}, state=${req.query.state ?? "MISSING"}`);
     const { code, state } = req.query;
 
     if (!state || typeof state !== "string" || !pendingStates.has(state)) {
+      console.error(`[callback] REJECTED — state ${state ? `"${String(state).slice(0, 8)}…" not in pendingStates` : "missing"} (pendingStates size=${pendingStates.size})`);
       res.status(400).send("Invalid or expired state parameter");
       return;
     }
     pendingStates.delete(state);
 
     if (!code || typeof code !== "string") {
+      console.error(`[callback] REJECTED — missing authorization code`);
       res.status(400).send("Missing authorization code");
       return;
     }
 
     try {
+      console.log(`[callback] Exchanging Whoop auth code for tokens…`);
       await exchangeCodeForTokens(code);
+      console.log(`[callback] Whoop tokens stored successfully`);
 
       // Check if this was part of a chained MCP auth flow
       const mcpAuth = pendingMcpAuth.get(state);
+      console.log(`[callback] pendingMcpAuth for state ${state.slice(0, 8)}… → ${mcpAuth ? "FOUND (chained flow)" : "NOT FOUND (standalone)"}`);
       if (mcpAuth) {
         pendingMcpAuth.delete(state);
 
@@ -302,11 +322,13 @@ export function createApp(): express.Express {
         url.searchParams.set("code", mcpCode);
         if (mcpAuth.state) url.searchParams.set("state", mcpAuth.state);
 
+        console.log(`[callback] Chained MCP auth complete → redirecting to ${url.origin}${url.pathname}`);
         res.redirect(url.toString());
         return;
       }
 
       // Standalone Whoop auth (not part of MCP flow)
+      console.log(`[callback] Standalone auth complete → showing success page`);
       res.send(`
         <!DOCTYPE html>
         <html><body style="font-family:system-ui;text-align:center;padding:4rem">
@@ -316,6 +338,7 @@ export function createApp(): express.Express {
       `);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
+      console.error(`[callback] ERROR:`, err);
       res.status(500).send(`Authorization failed: ${message}`);
     }
   });

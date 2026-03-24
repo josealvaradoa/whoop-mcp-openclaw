@@ -27,6 +27,7 @@ async function fetchWhoop<T>(
     }
   }
 
+  console.log(`[whoop-api] ${endpoint} ${params ? JSON.stringify(params) : ""}`);
   const response = await fetch(url.toString(), {
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -35,9 +36,11 @@ async function fetchWhoop<T>(
 
   if (!response.ok) {
     const body = await response.text();
+    console.error(`[whoop-api] ${endpoint} → ${response.status}: ${body.slice(0, 200)}`);
     throw new Error(`Whoop API error ${response.status} on ${endpoint}: ${body}`);
   }
 
+  console.log(`[whoop-api] ${endpoint} → ${response.status}`);
   return (await response.json()) as T;
 }
 

@@ -85,6 +85,8 @@ export function mountMcp(app: Express, provider: OAuthServerProvider): void {
   app.post("/mcp", auth, async (req: Request, res: Response) => {
     try {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    const method = (req.body as { method?: string })?.method ?? (Array.isArray(req.body) ? "batch" : "unknown");
+    console.log(`[mcp] POST /mcp — sessionId=${sessionId?.slice(0, 8) ?? "none"}…, method=${method}, active=${sessions.size}`);
 
     // Route to existing session
     if (sessionId && sessions.has(sessionId)) {
@@ -106,6 +108,7 @@ export function mountMcp(app: Express, provider: OAuthServerProvider): void {
 
     // No session ID + not an initialize request → 400
     if (!isInitializeRequest(req.body)) {
+      console.error(`[mcp] REJECTED — sessionId=${sessionId ? `${sessionId.slice(0, 8)}… NOT FOUND` : "missing"}, method=${method} is not initialize`);
       res.status(400).json({
         jsonrpc: "2.0",
         error: {

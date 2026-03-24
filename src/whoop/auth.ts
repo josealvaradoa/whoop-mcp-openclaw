@@ -131,6 +131,7 @@ async function refreshAccessToken(): Promise<string> {
 }
 
 async function doRefreshAccessToken(): Promise<string> {
+  console.log(`[whoop-auth] Attempting token refresh…`);
   const tokens = getTokens();
   if (!tokens) {
     throw new Error("No tokens stored. Please authorize at /auth/whoop");
@@ -152,6 +153,8 @@ async function doRefreshAccessToken(): Promise<string> {
   });
 
   if (!response.ok) {
+    const body = await response.text();
+    console.error(`[whoop-auth] Token refresh FAILED (${response.status}): ${body}`);
     cachedAccessToken = null;
     cachedExpiresAt = null;
     // Clear stale tokens from DB so the next check gives a clean "no tokens" state
@@ -163,6 +166,7 @@ async function doRefreshAccessToken(): Promise<string> {
   }
 
   const data = (await response.json()) as OAuthTokenResponse;
+  console.log(`[whoop-auth] Token refresh succeeded — expires_in=${data.expires_in}s`);
   storeTokens(data.access_token, data.refresh_token, data.expires_in, data.scope);
   return data.access_token;
 }
@@ -178,17 +182,20 @@ export async function getValidAccessToken(): Promise<string> {
   // Try to load from DB
   const tokens = getTokens();
   if (!tokens) {
+    console.error(`[whoop-auth] getValidAccessToken — no tokens in DB`);
     throw new Error("No tokens stored. Please authorize at /auth/whoop");
   }
 
   // If token is still valid, cache and return
   if (tokens.expiresAt - now > 300) {
+    console.log(`[whoop-auth] getValidAccessToken — loaded from DB, expires in ${tokens.expiresAt - now}s`);
     cachedAccessToken = tokens.accessToken;
     cachedExpiresAt = tokens.expiresAt;
     return tokens.accessToken;
   }
 
   // Token expiring soon — refresh
+  console.log(`[whoop-auth] getValidAccessToken — token expires in ${tokens.expiresAt - now}s, refreshing`);
   return refreshAccessToken();
 }
 
@@ -206,6 +213,7 @@ export function buildAuthUrl(state: string): string {
 }
 
 export async function exchangeCodeForTokens(code: string): Promise<void> {
+  console.log(`[whoop-auth] Exchanging authorization code for tokens (redirect_uri=${config.whoop.redirectUri})`);
   const response = await fetch(WHOOP_TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -220,10 +228,12 @@ export async function exchangeCodeForTokens(code: string): Promise<void> {
 
   if (!response.ok) {
     const body = await response.text();
+    console.error(`[whoop-auth] Token exchange FAILED (${response.status}): ${body}`);
     throw new Error(`Token exchange failed (${response.status}): ${body}`);
   }
 
   const data = (await response.json()) as Record<string, unknown>;
+  console.log(`[whoop-auth] Token exchange response keys: ${JSON.stringify(Object.keys(data))}`);
 
   const accessToken = data.access_token as string | undefined;
   const refreshToken = data.refresh_token as string | undefined;
@@ -235,4 +245,5 @@ export async function exchangeCodeForTokens(code: string): Promise<void> {
   }
 
   storeTokens(accessToken, refreshToken ?? "", expiresIn, scope ?? "");
+  console.log(`[whoop-auth] Tokens stored — expires_in=${expiresIn}s, scope=${scope ?? "none"}`);
 }
