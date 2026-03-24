@@ -94,7 +94,17 @@ export function mountMcp(app: Express, provider: OAuthServerProvider): void {
       return;
     }
 
-    // Only initialize requests can create new sessions
+    // Stale/unknown session ID → 404 per MCP Streamable HTTP spec
+    if (sessionId && !sessions.has(sessionId)) {
+      res.status(404).json({
+        jsonrpc: "2.0",
+        error: { code: -32001, message: "Session not found" },
+        id: null,
+      });
+      return;
+    }
+
+    // No session ID + not an initialize request → 400
     if (!isInitializeRequest(req.body)) {
       res.status(400).json({
         jsonrpc: "2.0",
@@ -150,7 +160,7 @@ export function mountMcp(app: Express, provider: OAuthServerProvider): void {
     try {
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
       if (!sessionId || !sessions.has(sessionId)) {
-        res.status(400).json({ error: "Invalid or missing session ID" });
+        res.status(404).json({ error: "Session not found" });
         return;
       }
       const session = sessions.get(sessionId)!;
@@ -168,7 +178,7 @@ export function mountMcp(app: Express, provider: OAuthServerProvider): void {
   app.delete("/mcp", auth, async (req: Request, res: Response) => {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
     if (!sessionId || !sessions.has(sessionId)) {
-      res.status(400).json({ error: "Invalid or missing session ID" });
+      res.status(404).json({ error: "Session not found" });
       return;
     }
     const session = sessions.get(sessionId)!;
