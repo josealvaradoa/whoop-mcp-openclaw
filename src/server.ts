@@ -123,7 +123,8 @@ export const oauthProvider: OAuthServerProvider = {
     });
 
     console.log(`[auth] pendingMcpAuth stored for state ${whoopState.slice(0, 8)}…, pendingStates size=${pendingStates.size}, pendingMcpAuth size=${pendingMcpAuth.size}`);
-    res.redirect(buildAuthUrl(whoopState));
+    const whoopUrl = buildAuthUrl(whoopState);
+    sendAuthRedirectPage(res, whoopUrl);
   },
 
   async challengeForAuthorizationCode(
@@ -223,6 +224,53 @@ export const oauthProvider: OAuthServerProvider = {
   },
 };
 
+/**
+ * Sends an intermediate HTML page instead of a bare 302 redirect for the
+ * Whoop OAuth URL.  Mobile in-app browsers (SFSafariViewController / Chrome
+ * Custom Tabs) can close immediately on rapid cross-domain 302 chains before
+ * the destination page ever renders.  Serving a real HTML page keeps the
+ * browser open; the page auto-redirects after a short delay and provides a
+ * manual fallback link so the user always reaches the Whoop login.
+ */
+function sendAuthRedirectPage(res: Response, whoopUrl: string): void {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connecting to WHOOP</title>
+  <meta http-equiv="refresh" content="2;url=${encodeURI(whoopUrl)}">
+  <style>
+    body{font-family:system-ui,-apple-system,sans-serif;display:flex;
+         align-items:center;justify-content:center;min-height:100vh;
+         margin:0;background:#0f0f0f;color:#fff;text-align:center}
+    .card{max-width:400px;padding:2rem}
+    .spinner{width:40px;height:40px;margin:0 auto 1.5rem;border:3px solid #333;
+             border-top-color:#44d62c;border-radius:50%;
+             animation:spin .8s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    a{color:#44d62c;font-weight:600;text-decoration:none}
+    a:hover{text-decoration:underline}
+    .hint{color:#999;font-size:.85rem;margin-top:1.5rem}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="spinner"></div>
+    <h2>Connecting to WHOOP&hellip;</h2>
+    <p>You&rsquo;ll be redirected to sign in with your WHOOP account.</p>
+    <p style="margin-top:1.5rem"><a id="link" href="${encodeURI(whoopUrl)}">Tap here if you&rsquo;re not redirected</a></p>
+    <p class="hint">Keep this browser open until sign-in is complete.</p>
+  </div>
+  <script>
+    // Use location.replace so the back button skips this interstitial
+    setTimeout(function(){location.replace(${JSON.stringify(whoopUrl)})},1500);
+  </script>
+</body>
+</html>`);
+}
+
 export function createApp(): express.Express {
   const app = express();
 
@@ -277,7 +325,8 @@ export function createApp(): express.Express {
     cleanupStates();
     const state = randomBytes(16).toString("hex");
     pendingStates.set(state, Date.now());
-    res.redirect(buildAuthUrl(state));
+    const whoopUrl = buildAuthUrl(state);
+    sendAuthRedirectPage(res, whoopUrl);
   });
 
   // Whoop OAuth callback
