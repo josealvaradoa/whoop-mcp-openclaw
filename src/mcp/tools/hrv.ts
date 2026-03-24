@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { daysAgo, today, getRecoveryCollection } from "../../whoop/client.js";
+import { daysAgo, today, getRecoveryCollection, getCycles } from "../../whoop/client.js";
 import { computeHrvTrend } from "../../compute/hrv.js";
 
 export function registerHrvTool(server: McpServer): void {
@@ -9,12 +9,21 @@ export function registerHrvTool(server: McpServer): void {
     "Get heart rate variability trend: baseline, current average, coefficient of variation, and trend direction. Key indicator of autonomic nervous system recovery.",
     { days: z.number().optional().default(30).describe("Number of days to look back. Default 30.") },
     async ({ days }) => {
-      const recoveries = await getRecoveryCollection(daysAgo(days), today());
+      const start = daysAgo(days);
+      const end = today();
+      const [recoveries, cycles] = await Promise.all([
+        getRecoveryCollection(start, end),
+        getCycles(start, end),
+      ]);
 
-      const dailyHrv = recoveries.map((r) => ({
-        date: new Date(r.cycle_id).toISOString().split("T")[0],
-        hrv_rmssd: r.score.hrv_rmssd_milli,
-      }));
+      const cycleDateMap = new Map(cycles.map((c) => [c.id, c.start.split("T")[0]]));
+
+      const dailyHrv = recoveries
+        .filter((r) => cycleDateMap.has(r.cycle_id))
+        .map((r) => ({
+          date: cycleDateMap.get(r.cycle_id)!,
+          hrv_rmssd: r.score.hrv_rmssd_milli,
+        }));
 
       const computed = computeHrvTrend(recoveries);
 

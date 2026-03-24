@@ -35,7 +35,11 @@ export function encrypt(plaintext: string, secret: string): string {
 }
 
 export function decrypt(encrypted: string, secret: string): string {
-  const [saltB64, ivB64, authTagB64, ciphertextB64] = encrypted.split(":");
+  const parts = encrypted.split(":");
+  if (parts.length !== 4) {
+    throw new Error("Malformed encrypted token: expected 4 colon-separated segments");
+  }
+  const [saltB64, ivB64, authTagB64, ciphertextB64] = parts;
   const salt = Buffer.from(saltB64, "base64");
   const iv = Buffer.from(ivB64, "base64");
   const authTag = Buffer.from(authTagB64, "base64");
@@ -96,18 +100,37 @@ export function getTokens(): {
 
   if (!row) return null;
 
-  const secret = config.security.encryptionSecret;
-  return {
-    accessToken: decrypt(row.access_token_encrypted, secret),
-    refreshToken: decrypt(row.refresh_token_encrypted, secret),
-    expiresAt: row.expires_at,
-    scope: row.scope,
-  };
+  try {
+    const secret = config.security.encryptionSecret;
+    return {
+      accessToken: decrypt(row.access_token_encrypted, secret),
+      refreshToken: decrypt(row.refresh_token_encrypted, secret),
+      expiresAt: row.expires_at,
+      scope: row.scope,
+    };
+  } catch (err) {
+    console.error("Failed to decrypt stored tokens, treating as missing:", err);
+    return null;
+  }
 }
 
 // --- Token Refresh ---
 
+let refreshPromise: Promise<string> | null = null;
+
 async function refreshAccessToken(): Promise<string> {
+  // Prevent concurrent refreshes — Whoop refresh tokens are single-use
+  if (refreshPromise) return refreshPromise;
+
+  refreshPromise = doRefreshAccessToken();
+  try {
+    return await refreshPromise;
+  } finally {
+    refreshPromise = null;
+  }
+}
+
+async function doRefreshAccessToken(): Promise<string> {
   const tokens = getTokens();
   if (!tokens) {
     throw new Error("No tokens stored. Please authorize at /auth/whoop");
@@ -131,6 +154,9 @@ async function refreshAccessToken(): Promise<string> {
   if (!response.ok) {
     cachedAccessToken = null;
     cachedExpiresAt = null;
+    // Clear stale tokens from DB so the next check gives a clean "no tokens" state
+    const db = getDb();
+    db.prepare("DELETE FROM tokens WHERE id = 1").run();
     throw new Error(
       `Token refresh failed (${response.status}). Please re-authorize at /auth/whoop`
     );

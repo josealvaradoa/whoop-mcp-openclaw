@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { daysAgo, today, getRecoveryCollection } from "../../whoop/client.js";
+import { daysAgo, today, getRecoveryCollection, getCycles } from "../../whoop/client.js";
 import { computeRecoveryTrend } from "../../compute/recovery.js";
 
 export function registerRecoveryTool(server: McpServer): void {
@@ -9,14 +9,23 @@ export function registerRecoveryTool(server: McpServer): void {
     "Get recovery score trend over a time window. Includes rolling averages, trend direction, and consecutive green/yellow/red day counts.",
     { days: z.number().optional().default(30).describe("Number of days to look back. Default 30.") },
     async ({ days }) => {
-      const recoveries = await getRecoveryCollection(daysAgo(days), today());
+      const start = daysAgo(days);
+      const end = today();
+      const [recoveries, cycles] = await Promise.all([
+        getRecoveryCollection(start, end),
+        getCycles(start, end),
+      ]);
 
-      const dailyRecovery = recoveries.map((r) => ({
-        date: new Date(r.cycle_id).toISOString().split("T")[0],
-        score: r.score.recovery_score,
-        hrv_rmssd: r.score.hrv_rmssd_milli,
-        resting_heart_rate: r.score.resting_heart_rate,
-      }));
+      const cycleDateMap = new Map(cycles.map((c) => [c.id, c.start.split("T")[0]]));
+
+      const dailyRecovery = recoveries
+        .filter((r) => cycleDateMap.has(r.cycle_id))
+        .map((r) => ({
+          date: cycleDateMap.get(r.cycle_id)!,
+          score: r.score.recovery_score,
+          hrv_rmssd: r.score.hrv_rmssd_milli,
+          resting_heart_rate: r.score.resting_heart_rate,
+        }));
 
       const computed = computeRecoveryTrend(recoveries);
 

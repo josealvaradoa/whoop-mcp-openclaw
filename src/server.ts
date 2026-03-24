@@ -13,25 +13,48 @@ import { buildAuthUrl, exchangeCodeForTokens, getTokens } from "./whoop/auth.js"
 const pendingStates = new Map<string, number>();
 const STATE_TTL_MS = 10 * 60 * 1000;
 
+// Pending MCP auth params stored while user completes Whoop OAuth
+interface PendingMcpAuth {
+  clientId: string;
+  redirectUri: string;
+  state?: string;
+  codeChallenge: string;
+  createdAt: number;
+}
+const pendingMcpAuth = new Map<string, PendingMcpAuth>();
+
 function cleanupStates(): void {
   const now = Date.now();
   for (const [state, created] of pendingStates) {
     if (now - created > STATE_TTL_MS) pendingStates.delete(state);
   }
+  for (const [state, data] of pendingMcpAuth) {
+    if (now - data.createdAt > STATE_TTL_MS) pendingMcpAuth.delete(state);
+  }
 }
 
 // --- MCP OAuth: in-memory stores ---
 const registeredClients = new Map<string, OAuthClientInformationFull>();
-const authorizationCodes = new Map<string, { clientId: string; codeChallenge: string; redirectUri: string }>();
+const authorizationCodes = new Map<string, { clientId: string; codeChallenge: string; redirectUri: string; createdAt: number }>();
+const AUTH_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const accessTokenStore = new Map<string, { clientId: string; expiresAt: number }>();
+const refreshTokenStore = new Map<string, { clientId: string; expiresAt: number }>();
 
 const ACCESS_TOKEN_TTL_S = 3600; // 1 hour
+const REFRESH_TOKEN_TTL_S = 30 * 24 * 3600; // 30 days
 
 // Cleanup expired tokens every 10 minutes
 setInterval(() => {
   const now = Math.floor(Date.now() / 1000);
   for (const [token, data] of accessTokenStore) {
     if (now > data.expiresAt) accessTokenStore.delete(token);
+  }
+  for (const [token, data] of refreshTokenStore) {
+    if (now > data.expiresAt) refreshTokenStore.delete(token);
+  }
+  const nowMs = Date.now();
+  for (const [code, data] of authorizationCodes) {
+    if (nowMs - data.createdAt > AUTH_CODE_TTL_MS) authorizationCodes.delete(code);
   }
 }, 10 * 60 * 1000);
 
@@ -63,19 +86,37 @@ export const oauthProvider: OAuthServerProvider = {
     params: AuthorizationParams,
     res: Response
   ): Promise<void> {
-    // Single-user server: auto-approve authorization
-    const code = randomBytes(32).toString("hex");
-    authorizationCodes.set(code, {
+    // If Whoop tokens already exist, auto-approve immediately
+    if (getTokens()) {
+      const code = randomBytes(32).toString("hex");
+      authorizationCodes.set(code, {
+        clientId: client.client_id,
+        codeChallenge: params.codeChallenge,
+        redirectUri: params.redirectUri,
+        createdAt: Date.now(),
+      });
+
+      const url = new URL(params.redirectUri);
+      url.searchParams.set("code", code);
+      if (params.state) url.searchParams.set("state", params.state);
+
+      res.redirect(url.toString());
+      return;
+    }
+
+    // No Whoop tokens — chain to Whoop OAuth, then complete MCP auth on callback
+    cleanupStates();
+    const whoopState = randomBytes(16).toString("hex");
+    pendingStates.set(whoopState, Date.now());
+    pendingMcpAuth.set(whoopState, {
       clientId: client.client_id,
-      codeChallenge: params.codeChallenge,
       redirectUri: params.redirectUri,
+      state: params.state,
+      codeChallenge: params.codeChallenge,
+      createdAt: Date.now(),
     });
 
-    const url = new URL(params.redirectUri);
-    url.searchParams.set("code", code);
-    if (params.state) url.searchParams.set("state", params.state);
-
-    res.redirect(url.toString());
+    res.redirect(buildAuthUrl(whoopState));
   },
 
   async challengeForAuthorizationCode(
@@ -100,18 +141,47 @@ export const oauthProvider: OAuthServerProvider = {
     authorizationCodes.delete(authorizationCode);
 
     const accessToken = randomBytes(32).toString("hex");
-    const expiresAt = Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_S;
-    accessTokenStore.set(accessToken, { clientId: client.client_id, expiresAt });
+    const refreshToken = randomBytes(32).toString("hex");
+    const now = Math.floor(Date.now() / 1000);
+    accessTokenStore.set(accessToken, { clientId: client.client_id, expiresAt: now + ACCESS_TOKEN_TTL_S });
+    refreshTokenStore.set(refreshToken, { clientId: client.client_id, expiresAt: now + REFRESH_TOKEN_TTL_S });
 
     return {
       access_token: accessToken,
       token_type: "Bearer",
       expires_in: ACCESS_TOKEN_TTL_S,
+      refresh_token: refreshToken,
     };
   },
 
-  async exchangeRefreshToken(): Promise<OAuthTokens> {
-    throw new Error("Refresh tokens not supported");
+  async exchangeRefreshToken(
+    client: OAuthClientInformationFull,
+    refreshToken: string
+  ): Promise<OAuthTokens> {
+    const data = refreshTokenStore.get(refreshToken);
+    if (!data || data.clientId !== client.client_id) {
+      throw new Error("Invalid refresh token");
+    }
+    const now = Math.floor(Date.now() / 1000);
+    if (now > data.expiresAt) {
+      refreshTokenStore.delete(refreshToken);
+      throw new Error("Refresh token expired");
+    }
+
+    // Rotate: delete old, issue new
+    refreshTokenStore.delete(refreshToken);
+
+    const newAccessToken = randomBytes(32).toString("hex");
+    const newRefreshToken = randomBytes(32).toString("hex");
+    accessTokenStore.set(newAccessToken, { clientId: client.client_id, expiresAt: now + ACCESS_TOKEN_TTL_S });
+    refreshTokenStore.set(newRefreshToken, { clientId: client.client_id, expiresAt: now + REFRESH_TOKEN_TTL_S });
+
+    return {
+      access_token: newAccessToken,
+      token_type: "Bearer",
+      expires_in: ACCESS_TOKEN_TTL_S,
+      refresh_token: newRefreshToken,
+    };
   },
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
@@ -213,6 +283,30 @@ export function createApp(): express.Express {
 
     try {
       await exchangeCodeForTokens(code);
+
+      // Check if this was part of a chained MCP auth flow
+      const mcpAuth = pendingMcpAuth.get(state);
+      if (mcpAuth) {
+        pendingMcpAuth.delete(state);
+
+        // Complete the MCP authorization by generating a code and redirecting to Claude
+        const mcpCode = randomBytes(32).toString("hex");
+        authorizationCodes.set(mcpCode, {
+          clientId: mcpAuth.clientId,
+          codeChallenge: mcpAuth.codeChallenge,
+          redirectUri: mcpAuth.redirectUri,
+          createdAt: Date.now(),
+        });
+
+        const url = new URL(mcpAuth.redirectUri);
+        url.searchParams.set("code", mcpCode);
+        if (mcpAuth.state) url.searchParams.set("state", mcpAuth.state);
+
+        res.redirect(url.toString());
+        return;
+      }
+
+      // Standalone Whoop auth (not part of MCP flow)
       res.send(`
         <!DOCTYPE html>
         <html><body style="font-family:system-ui;text-align:center;padding:4rem">
