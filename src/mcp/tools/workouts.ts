@@ -4,6 +4,41 @@ import { daysAgo, today, getWorkoutCollection } from "../../whoop/client.js";
 
 const MILLI_TO_MIN = 1 / (1000 * 60);
 
+const workoutEntrySchema = z.object({
+  date: z.string(),
+  sport: z.string(),
+  strain: z.number(),
+  duration_min: z.number(),
+  avg_hr: z.number(),
+  max_hr: z.number(),
+  calories: z.number(),
+  hr_zones_minutes: z.object({
+    zone1: z.number(),
+    zone2: z.number(),
+    zone3: z.number(),
+    zone4: z.number(),
+    zone5: z.number(),
+  }),
+});
+
+const workoutsOutputSchema = z.object({
+  raw: z.object({
+    workouts: z.array(workoutEntrySchema),
+  }),
+  computed: z.object({
+    total_workouts: z.number(),
+    weekly_volume_hrs: z.number(),
+    weekly_strain_total: z.number(),
+    sport_distribution: z.record(z.string(), z.number()),
+    intensity_distribution: z.object({
+      zone1_2_pct: z.number(),
+      zone3_pct: z.number(),
+      zone4_5_pct: z.number(),
+    }),
+  }),
+  _truncation_warning: z.string().optional(),
+});
+
 export function registerWorkoutsTool(server: McpServer): void {
   server.registerTool(
     "whoop_get_workouts",
@@ -14,6 +49,7 @@ export function registerWorkoutsTool(server: McpServer): void {
         days: z.number().int().min(1).optional().default(14).describe("Number of days to look back. Minimum 1, default 14."),
         sport: z.string().optional().describe("Filter by sport name (e.g. 'running', 'cycling', 'swimming'). Optional."),
       },
+      outputSchema: workoutsOutputSchema,
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -23,7 +59,7 @@ export function registerWorkoutsTool(server: McpServer): void {
     },
     async ({ days, sport }) => {
       try {
-        const workouts = await getWorkoutCollection(daysAgo(days), today());
+        const { data: workouts, truncated } = await getWorkoutCollection(daysAgo(days), today());
 
         // Map to readable format — filter out unscored workouts
         const mapped = workouts
@@ -86,26 +122,23 @@ export function registerWorkoutsTool(server: McpServer): void {
             }
           : { zone1_2_pct: 0, zone3_pct: 0, zone4_5_pct: 0 };
 
+        const structuredContent = {
+          raw: { workouts: filtered },
+          computed: {
+            total_workouts: filtered.length,
+            weekly_volume_hrs: weeklyVolumeHrs,
+            weekly_strain_total: weeklyStrainTotal,
+            sport_distribution: sportDist,
+            intensity_distribution: intensityDist,
+          },
+          ...(truncated && {
+            _truncation_warning: "Some data pages were truncated at the 50-page API limit. Results may be incomplete.",
+          }),
+        };
+
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(
-                {
-                  raw: { workouts: filtered },
-                  computed: {
-                    total_workouts: filtered.length,
-                    weekly_volume_hrs: weeklyVolumeHrs,
-                    weekly_strain_total: weeklyStrainTotal,
-                    sport_distribution: sportDist,
-                    intensity_distribution: intensityDist,
-                  },
-                },
-                null,
-                2
-              ),
-            },
-          ],
+          structuredContent,
+          content: [{ type: "text" as const, text: JSON.stringify(structuredContent, null, 2) }],
         };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

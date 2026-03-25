@@ -3,6 +3,28 @@ import { z } from "zod";
 import { daysAgo, today, getRecoveryCollection, getCycles } from "../../whoop/client.js";
 import { computeRecoveryTrend } from "../../compute/recovery.js";
 
+const recoveryOutputSchema = z.object({
+  raw: z.object({
+    daily_recovery: z.array(
+      z.object({
+        date: z.string(),
+        score: z.number(),
+        hrv_rmssd: z.number(),
+        resting_heart_rate: z.number(),
+      })
+    ),
+  }),
+  computed: z.object({
+    avg_7d: z.number(),
+    avg_30d: z.number(),
+    trend: z.string(),
+    consecutive_red_days: z.number(),
+    consecutive_yellow_days: z.number(),
+    consecutive_green_days: z.number(),
+  }),
+  _truncation_warning: z.string().optional(),
+});
+
 export function registerRecoveryTool(server: McpServer): void {
   server.registerTool(
     "whoop_get_recovery_trend",
@@ -12,6 +34,7 @@ export function registerRecoveryTool(server: McpServer): void {
       inputSchema: {
         days: z.number().int().min(7).optional().default(30).describe("Number of days to look back. Minimum 7, default 30."),
       },
+      outputSchema: recoveryOutputSchema,
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -23,10 +46,14 @@ export function registerRecoveryTool(server: McpServer): void {
       try {
         const start = daysAgo(days);
         const end = today();
-        const [recoveries, cycles] = await Promise.all([
+        const [
+          { data: recoveries, truncated: t1 },
+          { data: cycles, truncated: t2 },
+        ] = await Promise.all([
           getRecoveryCollection(start, end),
           getCycles(start, end),
         ]);
+        const truncated = t1 || t2;
 
         const cycleDateMap = new Map(cycles.map((c) => [c.id, c.start.split("T")[0]]));
 
@@ -41,13 +68,17 @@ export function registerRecoveryTool(server: McpServer): void {
 
         const computed = computeRecoveryTrend(recoveries);
 
+        const structuredContent = {
+          raw: { daily_recovery: dailyRecovery },
+          computed,
+          ...(truncated && {
+            _truncation_warning: "Some data pages were truncated at the 50-page API limit. Results may be incomplete.",
+          }),
+        };
+
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ raw: { daily_recovery: dailyRecovery }, computed }, null, 2),
-            },
-          ],
+          structuredContent,
+          content: [{ type: "text" as const, text: JSON.stringify(structuredContent, null, 2) }],
         };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

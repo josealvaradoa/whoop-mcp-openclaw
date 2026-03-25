@@ -9,32 +9,75 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { config } from "./config.js";
 import { buildAuthUrl, exchangeCodeForTokens, getTokens } from "./whoop/auth.js";
 import { getDb } from "./db/connection.js";
+import { logger } from "./logger.js";
 
-// --- Whoop OAuth state store ---
-const pendingStates = new Map<string, number>();
-const STATE_TTL_MS = 10 * 60 * 1000;
+// --- SQLite-backed Whoop OAuth state ---
 
-// Pending MCP auth params stored while user completes Whoop OAuth
+const STATE_TTL_S = 10 * 60; // 10 minutes
+
+function dbAddPendingState(state: string): void {
+  getDb().prepare("INSERT OR REPLACE INTO oauth_pending_states (state) VALUES (?)").run(state);
+}
+
+function dbHasPendingState(state: string): boolean {
+  const row = getDb()
+    .prepare("SELECT 1 FROM oauth_pending_states WHERE state = ? AND created_at + ? > unixepoch()")
+    .get(state, STATE_TTL_S);
+  return !!row;
+}
+
+function dbDeletePendingState(state: string): void {
+  getDb().prepare("DELETE FROM oauth_pending_states WHERE state = ?").run(state);
+}
+
 interface PendingMcpAuth {
   clientId: string;
   redirectUri: string;
   state?: string;
   codeChallenge: string;
-  createdAt: number;
-}
-const pendingMcpAuth = new Map<string, PendingMcpAuth>();
-
-function cleanupStates(): void {
-  const now = Date.now();
-  for (const [state, created] of pendingStates) {
-    if (now - created > STATE_TTL_MS) pendingStates.delete(state);
-  }
-  for (const [state, data] of pendingMcpAuth) {
-    if (now - data.createdAt > STATE_TTL_MS) pendingMcpAuth.delete(state);
-  }
 }
 
-// --- MCP OAuth: short-lived state in-memory, persistent state in SQLite ---
+function dbAddPendingMcpAuth(whoopState: string, auth: PendingMcpAuth): void {
+  getDb()
+    .prepare(
+      `INSERT OR REPLACE INTO oauth_pending_mcp_auth
+         (state, client_id, redirect_uri, mcp_state, code_challenge)
+       VALUES (?, ?, ?, ?, ?)`
+    )
+    .run(whoopState, auth.clientId, auth.redirectUri, auth.state ?? null, auth.codeChallenge);
+}
+
+function dbGetPendingMcpAuth(whoopState: string): PendingMcpAuth | undefined {
+  const row = getDb()
+    .prepare(
+      `SELECT client_id, redirect_uri, mcp_state, code_challenge
+       FROM oauth_pending_mcp_auth
+       WHERE state = ? AND created_at + ? > unixepoch()`
+    )
+    .get(whoopState, STATE_TTL_S) as
+    | { client_id: string; redirect_uri: string; mcp_state: string | null; code_challenge: string }
+    | undefined;
+
+  if (!row) return undefined;
+  return {
+    clientId: row.client_id,
+    redirectUri: row.redirect_uri,
+    state: row.mcp_state ?? undefined,
+    codeChallenge: row.code_challenge,
+  };
+}
+
+function dbDeletePendingMcpAuth(whoopState: string): void {
+  getDb().prepare("DELETE FROM oauth_pending_mcp_auth WHERE state = ?").run(whoopState);
+}
+
+function cleanupExpiredOAuthState(): void {
+  const db = getDb();
+  db.prepare("DELETE FROM oauth_pending_states WHERE created_at + ? < unixepoch()").run(STATE_TTL_S);
+  db.prepare("DELETE FROM oauth_pending_mcp_auth WHERE created_at + ? < unixepoch()").run(STATE_TTL_S);
+}
+
+// --- MCP OAuth: short-lived codes in-memory, tokens in SQLite ---
 const authorizationCodes = new Map<string, { clientId: string; codeChallenge: string; redirectUri: string; createdAt: number }>();
 const AUTH_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -44,59 +87,56 @@ const REFRESH_TOKEN_TTL_S = 30 * 24 * 3600; // 30 days
 // --- SQLite-backed MCP token helpers ---
 
 function dbGetClient(clientId: string): OAuthClientInformationFull | undefined {
-  const db = getDb();
-  const row = db.prepare("SELECT client_info FROM mcp_clients WHERE client_id = ?").get(clientId) as
-    | { client_info: string }
-    | undefined;
+  const row = getDb()
+    .prepare("SELECT client_info FROM mcp_clients WHERE client_id = ?")
+    .get(clientId) as { client_info: string } | undefined;
   if (!row) return undefined;
   return JSON.parse(row.client_info) as OAuthClientInformationFull;
 }
 
 function dbRegisterClient(clientInfo: OAuthClientInformationFull): void {
-  const db = getDb();
-  db.prepare("INSERT OR REPLACE INTO mcp_clients (client_id, client_info) VALUES (?, ?)")
+  getDb()
+    .prepare("INSERT OR REPLACE INTO mcp_clients (client_id, client_info) VALUES (?, ?)")
     .run(clientInfo.client_id, JSON.stringify(clientInfo));
 }
 
 function dbGetAccessToken(token: string): { clientId: string; expiresAt: number } | undefined {
-  const db = getDb();
-  const row = db.prepare("SELECT client_id, expires_at FROM mcp_access_tokens WHERE token = ?").get(token) as
-    | { client_id: string; expires_at: number }
-    | undefined;
+  const row = getDb()
+    .prepare("SELECT client_id, expires_at FROM mcp_access_tokens WHERE token = ?")
+    .get(token) as { client_id: string; expires_at: number } | undefined;
   return row ? { clientId: row.client_id, expiresAt: row.expires_at } : undefined;
 }
 
 function dbSetAccessToken(token: string, clientId: string, expiresAt: number): void {
-  const db = getDb();
-  db.prepare("INSERT OR REPLACE INTO mcp_access_tokens (token, client_id, expires_at) VALUES (?, ?, ?)")
+  getDb()
+    .prepare("INSERT OR REPLACE INTO mcp_access_tokens (token, client_id, expires_at) VALUES (?, ?, ?)")
     .run(token, clientId, expiresAt);
 }
 
 function dbGetRefreshToken(token: string): { clientId: string; expiresAt: number } | undefined {
-  const db = getDb();
-  const row = db.prepare("SELECT client_id, expires_at FROM mcp_refresh_tokens WHERE token = ?").get(token) as
-    | { client_id: string; expires_at: number }
-    | undefined;
+  const row = getDb()
+    .prepare("SELECT client_id, expires_at FROM mcp_refresh_tokens WHERE token = ?")
+    .get(token) as { client_id: string; expires_at: number } | undefined;
   return row ? { clientId: row.client_id, expiresAt: row.expires_at } : undefined;
 }
 
 function dbSetRefreshToken(token: string, clientId: string, expiresAt: number): void {
-  const db = getDb();
-  db.prepare("INSERT OR REPLACE INTO mcp_refresh_tokens (token, client_id, expires_at) VALUES (?, ?, ?)")
+  getDb()
+    .prepare("INSERT OR REPLACE INTO mcp_refresh_tokens (token, client_id, expires_at) VALUES (?, ?, ?)")
     .run(token, clientId, expiresAt);
 }
 
 function dbDeleteRefreshToken(token: string): void {
-  const db = getDb();
-  db.prepare("DELETE FROM mcp_refresh_tokens WHERE token = ?").run(token);
+  getDb().prepare("DELETE FROM mcp_refresh_tokens WHERE token = ?").run(token);
 }
 
-// Cleanup expired tokens every 10 minutes
+// Cleanup expired tokens + OAuth state every 10 minutes
 setInterval(() => {
   const now = Math.floor(Date.now() / 1000);
   const db = getDb();
   db.prepare("DELETE FROM mcp_access_tokens WHERE expires_at < ?").run(now);
   db.prepare("DELETE FROM mcp_refresh_tokens WHERE expires_at < ?").run(now);
+  cleanupExpiredOAuthState();
   const nowMs = Date.now();
   for (const [code, data] of authorizationCodes) {
     if (nowMs - data.createdAt > AUTH_CODE_TTL_MS) authorizationCodes.delete(code);
@@ -107,7 +147,7 @@ setInterval(() => {
 const clientsStore: OAuthRegisteredClientsStore = {
   getClient(clientId: string) {
     const client = dbGetClient(clientId);
-    console.log(`[auth] getClient ${clientId.slice(0, 8)}… → ${client ? "found" : "NOT FOUND"}`);
+    logger.debug({ clientId: clientId.slice(0, 8), found: !!client }, "auth getClient");
     return client;
   },
   registerClient(clientInfo: Omit<OAuthClientInformationFull, "client_id" | "client_id_issued_at">) {
@@ -118,7 +158,7 @@ const clientsStore: OAuthRegisteredClientsStore = {
       client_id_issued_at: Math.floor(Date.now() / 1000),
     };
     dbRegisterClient(full);
-    console.log(`[auth] registerClient → ${clientId.slice(0, 8)}…`);
+    logger.info({ clientId: clientId.slice(0, 8) }, "auth registerClient");
     return full;
   },
 };
@@ -134,7 +174,7 @@ export const oauthProvider: OAuthServerProvider = {
     params: AuthorizationParams,
     res: Response
   ): Promise<void> {
-    console.log(`[auth] authorize called for client ${client.client_id.slice(0, 8)}…, redirectUri=${params.redirectUri}`);
+    logger.info({ clientId: client.client_id.slice(0, 8), redirectUri: params.redirectUri }, "auth authorize");
     // If Whoop tokens already exist, auto-approve immediately
     if (getTokens()) {
       const code = randomBytes(32).toString("hex");
@@ -149,25 +189,24 @@ export const oauthProvider: OAuthServerProvider = {
       url.searchParams.set("code", code);
       if (params.state) url.searchParams.set("state", params.state);
 
-      console.log(`[auth] Whoop tokens exist → auto-approve, redirecting to Claude`);
+      logger.info("auth auto-approve: Whoop tokens exist, redirecting to Claude");
       res.redirect(url.toString());
       return;
     }
 
     // No Whoop tokens — chain to Whoop OAuth, then complete MCP auth on callback
-    console.log(`[auth] No Whoop tokens → chaining to Whoop OAuth`);
-    cleanupStates();
+    logger.info("auth chaining to Whoop OAuth (no Whoop tokens)");
+    cleanupExpiredOAuthState();
     const whoopState = randomBytes(16).toString("hex");
-    pendingStates.set(whoopState, Date.now());
-    pendingMcpAuth.set(whoopState, {
+    dbAddPendingState(whoopState);
+    dbAddPendingMcpAuth(whoopState, {
       clientId: client.client_id,
       redirectUri: params.redirectUri,
       state: params.state,
       codeChallenge: params.codeChallenge,
-      createdAt: Date.now(),
     });
 
-    console.log(`[auth] pendingMcpAuth stored for state ${whoopState.slice(0, 8)}…, pendingStates size=${pendingStates.size}, pendingMcpAuth size=${pendingMcpAuth.size}`);
+    logger.debug({ whoopState: whoopState.slice(0, 8) }, "auth pendingMcpAuth stored in SQLite");
     const whoopUrl = buildAuthUrl(whoopState);
     sendAuthRedirectPage(res, whoopUrl);
   },
@@ -177,7 +216,7 @@ export const oauthProvider: OAuthServerProvider = {
     authorizationCode: string
   ): Promise<string> {
     const data = authorizationCodes.get(authorizationCode);
-    console.log(`[auth] challengeForAuthorizationCode → ${data ? "found" : "NOT FOUND"} (stored codes: ${authorizationCodes.size})`);
+    logger.debug({ found: !!data, storedCodes: authorizationCodes.size }, "auth challengeForAuthorizationCode");
     if (!data) throw new Error("Invalid authorization code");
     return data.codeChallenge;
   },
@@ -190,10 +229,10 @@ export const oauthProvider: OAuthServerProvider = {
   ): Promise<OAuthTokens> {
     const data = authorizationCodes.get(authorizationCode);
     if (!data || data.clientId !== client.client_id) {
-      console.error(`[auth] exchangeAuthorizationCode FAILED — code ${data ? "found but clientId mismatch" : "NOT FOUND"}`);
+      logger.error({ found: !!data }, "auth exchangeAuthorizationCode failed");
       throw new Error("Invalid authorization code");
     }
-    console.log(`[auth] exchangeAuthorizationCode → success, issuing access + refresh tokens`);
+    logger.info("auth exchangeAuthorizationCode success — issuing tokens");
     authorizationCodes.delete(authorizationCode);
 
     const accessToken = randomBytes(32).toString("hex");
@@ -216,7 +255,7 @@ export const oauthProvider: OAuthServerProvider = {
   ): Promise<OAuthTokens> {
     const data = dbGetRefreshToken(refreshToken);
     if (!data || data.clientId !== client.client_id) {
-      console.error(`[auth] exchangeRefreshToken FAILED — token ${data ? "found but clientId mismatch" : "NOT FOUND"}`);
+      logger.error({ found: !!data }, "auth exchangeRefreshToken failed");
       throw new Error("Invalid refresh token");
     }
     const now = Math.floor(Date.now() / 1000);
@@ -245,7 +284,7 @@ export const oauthProvider: OAuthServerProvider = {
     // Check dynamic tokens from SQLite
     const data = dbGetAccessToken(token);
     if (data && Math.floor(Date.now() / 1000) < data.expiresAt) {
-      console.log(`[auth] verifyAccessToken → dynamic token valid (client ${data.clientId.slice(0, 8)}…)`);
+      logger.debug({ clientId: data.clientId.slice(0, 8) }, "auth verifyAccessToken — dynamic token valid");
       return {
         token,
         clientId: data.clientId,
@@ -256,7 +295,7 @@ export const oauthProvider: OAuthServerProvider = {
 
     // Check static bearer token
     if (token === config.security.mcpBearerToken) {
-      console.log(`[auth] verifyAccessToken → static bearer token`);
+      logger.debug("auth verifyAccessToken — static bearer token");
       return {
         token,
         clientId: "static",
@@ -264,7 +303,7 @@ export const oauthProvider: OAuthServerProvider = {
       };
     }
 
-    console.error(`[auth] verifyAccessToken REJECTED — token not found in DB and not static`);
+    logger.warn("auth verifyAccessToken rejected — token not found");
     throw new Error("Invalid or expired token");
   },
 };
@@ -372,41 +411,43 @@ export function createApp(): express.Express {
 
   // Start Whoop OAuth flow
   app.get("/auth/whoop", (_req: Request, res: Response) => {
-    cleanupStates();
+    cleanupExpiredOAuthState();
     const state = randomBytes(16).toString("hex");
-    pendingStates.set(state, Date.now());
+    dbAddPendingState(state);
     const whoopUrl = buildAuthUrl(state);
     sendAuthRedirectPage(res, whoopUrl);
   });
 
   // Whoop OAuth callback
   app.get("/auth/whoop/callback", async (req: Request, res: Response) => {
-    console.log(`[callback] /auth/whoop/callback hit — query: code=${req.query.code ? "present" : "MISSING"}, state=${req.query.state ?? "MISSING"}`);
     const { code, state } = req.query;
+    logger.info(
+      { codePresent: !!code, statePresent: !!state },
+      "auth /whoop/callback hit"
+    );
 
-    if (!state || typeof state !== "string" || !pendingStates.has(state)) {
-      console.error(`[callback] REJECTED — state ${state ? `"${String(state).slice(0, 8)}…" not in pendingStates` : "missing"} (pendingStates size=${pendingStates.size})`);
+    if (!state || typeof state !== "string" || !dbHasPendingState(state)) {
+      logger.error({ state: state ? String(state).slice(0, 8) : null }, "auth callback rejected — invalid state");
       res.status(400).send("Invalid or expired state parameter");
       return;
     }
-    pendingStates.delete(state);
+    dbDeletePendingState(state);
 
     if (!code || typeof code !== "string") {
-      console.error(`[callback] REJECTED — missing authorization code`);
+      logger.error("auth callback rejected — missing authorization code");
       res.status(400).send("Missing authorization code");
       return;
     }
 
     try {
-      console.log(`[callback] Exchanging Whoop auth code for tokens…`);
       await exchangeCodeForTokens(code);
-      console.log(`[callback] Whoop tokens stored successfully`);
+      logger.info("auth Whoop tokens stored successfully");
 
       // Check if this was part of a chained MCP auth flow
-      const mcpAuth = pendingMcpAuth.get(state);
-      console.log(`[callback] pendingMcpAuth for state ${state.slice(0, 8)}… → ${mcpAuth ? "FOUND (chained flow)" : "NOT FOUND (standalone)"}`);
+      const mcpAuth = dbGetPendingMcpAuth(state);
+      logger.info({ chained: !!mcpAuth }, "auth callback flow type");
       if (mcpAuth) {
-        pendingMcpAuth.delete(state);
+        dbDeletePendingMcpAuth(state);
 
         // Complete the MCP authorization by generating a code and redirecting to Claude
         const mcpCode = randomBytes(32).toString("hex");
@@ -421,13 +462,13 @@ export function createApp(): express.Express {
         url.searchParams.set("code", mcpCode);
         if (mcpAuth.state) url.searchParams.set("state", mcpAuth.state);
 
-        console.log(`[callback] Chained MCP auth complete → redirecting to ${url.origin}${url.pathname}`);
+        logger.info({ redirectOrigin: url.origin }, "auth chained MCP auth complete");
         res.redirect(url.toString());
         return;
       }
 
       // Standalone Whoop auth (not part of MCP flow)
-      console.log(`[callback] Standalone auth complete → showing success page`);
+      logger.info("auth standalone auth complete");
       res.send(`
         <!DOCTYPE html>
         <html><body style="font-family:system-ui;text-align:center;padding:4rem">
@@ -437,14 +478,14 @@ export function createApp(): express.Express {
       `);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
-      console.error(`[callback] ERROR:`, err);
+      logger.error({ err }, "auth callback error");
       res.status(500).send(`Authorization failed: ${message}`);
     }
   });
 
   // Global error handler — log unhandled errors
   app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-    console.error("Unhandled error:", err);
+    logger.error({ err }, "Unhandled error");
     if (!res.headersSent) {
       res.status(500).json({ error: "Internal server error", message: err.message });
     }
