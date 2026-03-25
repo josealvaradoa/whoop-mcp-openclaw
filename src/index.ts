@@ -4,6 +4,7 @@ import { initSchema } from "./db/schema.js";
 import { startCacheCleanupInterval } from "./db/cache.js";
 import { createApp, oauthProvider } from "./server.js";
 import { mountMcp } from "./mcp/setup.js";
+import logger from "./logger.js";
 
 // Initialize database
 const db = getDb();
@@ -15,5 +16,5 @@ const app = createApp();
 mountMcp(app, oauthProvider);
 
 app.listen(config.server.port, () => {
-  console.log(`whoop-ironman-mcp running on port ${config.server.port}`);
+  logger.info({ port: config.server.port }, "whoop-ironman-mcp running");
 });

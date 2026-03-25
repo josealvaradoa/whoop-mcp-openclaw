@@ -45,4 +45,22 @@ export function initSchema(db: Database.Database): void {
       expires_at INTEGER NOT NULL
     )
   `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS oauth_pending_states (
+      state TEXT PRIMARY KEY,
+      created_at_ms INTEGER NOT NULL
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS oauth_pending_mcp_auth (
+      state TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL,
+      redirect_uri TEXT NOT NULL,
+      state_param TEXT,
+      code_challenge TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL
+    )
+  `);
 }

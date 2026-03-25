@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
 import { daysAgo, today, getCycles, getRecoveryCollection, getSleepCollection } from "../../whoop/client.js";
 import { config } from "../../config.js";
 import {
@@ -15,6 +16,28 @@ export function registerOverviewTool(server: McpServer): void {
       title: "Today's Whoop Overview",
       description: "Get today's Whoop overview: recovery score, HRV, resting heart rate, SpO2, skin temperature, sleep score, sleep duration, strain, and calories. Includes computed readiness assessment (green/yellow/red) and comparison to 30-day baselines.",
       inputSchema: {},
+      outputSchema: {
+        raw: z.object({
+          recovery_score: z.number(),
+          hrv_rmssd: z.number(),
+          resting_heart_rate: z.number(),
+          spo2_pct: z.number().nullable(),
+          skin_temp_celsius: z.number().nullable(),
+          sleep_performance_pct: z.number().nullable(),
+          sleep_duration_hrs: z.number().nullable(),
+          sleep_efficiency_pct: z.number().nullable(),
+          day_strain: z.number(),
+          day_calories: z.number(),
+        }),
+        computed: z.object({
+          readiness: z.string(),
+          hrv_vs_baseline_pct: z.number().nullable(),
+          rhr_vs_baseline_pct: z.number().nullable(),
+          sleep_debt_hrs: z.number(),
+          recommendation: z.string(),
+        }),
+        warnings: z.array(z.string()).optional(),
+      },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -28,12 +51,24 @@ export function registerOverviewTool(server: McpServer): void {
         const end = today();
         const start30d = daysAgo(30);
 
-        const [cycles, recoveries, sleeps, recoveries30d] = await Promise.all([
+        const [cyclesResult, recoveriesResult, sleepsResult, recoveries30dResult] = await Promise.all([
           getCycles(start, end),
           getRecoveryCollection(start, end),
           getSleepCollection(start, end),
           getRecoveryCollection(start30d, end),
         ]);
+
+        const { records: cycles } = cyclesResult;
+        const { records: recoveries } = recoveriesResult;
+        const { records: sleeps } = sleepsResult;
+        const { records: recoveries30d } = recoveries30dResult;
+
+        const warnings: string[] = [
+          cyclesResult.truncated && "Cycle data truncated at 50 pages — some history omitted",
+          recoveriesResult.truncated && "Recovery data truncated at 50 pages — some history omitted",
+          sleepsResult.truncated && "Sleep data truncated at 50 pages — some history omitted",
+          recoveries30dResult.truncated && "30-day recovery data truncated at 50 pages — some history omitted",
+        ].filter((w): w is string => typeof w === "string");
 
         const todayCycle = cycles[0];
         const todayRecovery = recoveries[0];
@@ -66,35 +101,35 @@ export function registerOverviewTool(server: McpServer): void {
           ? Math.round((sleepDay.duration_hrs - config.athlete.sleep_target_hrs) * 10) / 10
           : 0;
 
+        const structuredContent = {
+          raw: {
+            recovery_score: recoveryScore,
+            hrv_rmssd: hrvRmssd,
+            resting_heart_rate: rhr,
+            spo2_pct: spo2,
+            skin_temp_celsius: skinTemp,
+            sleep_performance_pct: sleepPerfPct,
+            sleep_duration_hrs: sleepDay?.duration_hrs ?? null,
+            sleep_efficiency_pct: sleepEffPct,
+            day_strain: strain,
+            day_calories: calories,
+          },
+          computed: {
+            readiness,
+            hrv_vs_baseline_pct: hrvVsBaseline,
+            rhr_vs_baseline_pct: rhrVsBaseline,
+            sleep_debt_hrs: sleepDebtHrs,
+            recommendation,
+          },
+          ...(warnings.length > 0 && { warnings }),
+        };
+
         return {
+          structuredContent,
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify(
-                {
-                  raw: {
-                    recovery_score: recoveryScore,
-                    hrv_rmssd: hrvRmssd,
-                    resting_heart_rate: rhr,
-                    spo2_pct: spo2,
-                    skin_temp_celsius: skinTemp,
-                    sleep_performance_pct: sleepPerfPct,
-                    sleep_duration_hrs: sleepDay?.duration_hrs ?? null,
-                    sleep_efficiency_pct: sleepEffPct,
-                    day_strain: strain,
-                    day_calories: calories,
-                  },
-                  computed: {
-                    readiness,
-                    hrv_vs_baseline_pct: hrvVsBaseline,
-                    rhr_vs_baseline_pct: rhrVsBaseline,
-                    sleep_debt_hrs: sleepDebtHrs,
-                    recommendation,
-                  },
-                },
-                null,
-                2
-              ),
+              text: JSON.stringify(structuredContent, null, 2),
             },
           ],
         };
