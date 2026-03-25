@@ -351,8 +351,13 @@ export function createApp(): express.Express {
     res.json({ status: "ok" });
   });
 
-  // Whoop auth status
-  app.get("/auth/status", (_req: Request, res: Response) => {
+  // Whoop auth status — requires static bearer token to prevent info leak
+  app.get("/auth/status", (req: Request, res: Response) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || authHeader !== `Bearer ${config.security.mcpBearerToken}`) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
     const tokens = getTokens();
     if (!tokens) {
       res.json({ authenticated: false });
