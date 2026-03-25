@@ -12,6 +12,16 @@ export function registerTrainingLoadTool(server: McpServer): void {
       inputSchema: {
         days: z.number().int().min(28).optional().default(42).describe("Number of days of strain history to use for calculation. Minimum 28, default 42."),
       },
+      outputSchema: {
+        raw: z.object({
+          daily_strain: z.array(z.object({
+            date: z.string(),
+            strain: z.number(),
+          })),
+        }),
+        computed: z.record(z.string(), z.unknown()),
+        warnings: z.array(z.string()).optional(),
+      },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -21,7 +31,12 @@ export function registerTrainingLoadTool(server: McpServer): void {
     },
     async ({ days }) => {
       try {
-        const cycles = await getCycles(daysAgo(days), today());
+        const cyclesResult = await getCycles(daysAgo(days), today());
+        const { records: cycles } = cyclesResult;
+
+        const warnings: string[] = cyclesResult.truncated
+          ? ["Cycle data truncated at 50 pages — some history omitted"]
+          : [];
 
         const dailyStrain = cycles.map((c) => ({
           date: c.start.split("T")[0],
@@ -31,11 +46,18 @@ export function registerTrainingLoadTool(server: McpServer): void {
         const strainValues = dailyStrain.map((d) => d.strain);
         const computed = computeTrainingLoad(strainValues);
 
+        const structuredContent = {
+          raw: { daily_strain: dailyStrain },
+          computed,
+          ...(warnings.length > 0 && { warnings }),
+        };
+
         return {
+          structuredContent,
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify({ raw: { daily_strain: dailyStrain }, computed }, null, 2),
+              text: JSON.stringify(structuredContent, null, 2),
             },
           ],
         };

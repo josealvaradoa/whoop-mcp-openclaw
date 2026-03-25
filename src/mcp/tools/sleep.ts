@@ -12,6 +12,13 @@ export function registerSleepTool(server: McpServer): void {
       inputSchema: {
         days: z.number().int().min(3).optional().default(14).describe("Number of days to look back. Minimum 3, default 14."),
       },
+      outputSchema: {
+        raw: z.object({
+          daily_sleep: z.array(z.record(z.string(), z.unknown())),
+        }),
+        computed: z.record(z.string(), z.unknown()),
+        warnings: z.array(z.string()).optional(),
+      },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -21,15 +28,28 @@ export function registerSleepTool(server: McpServer): void {
     },
     async ({ days }) => {
       try {
-        const sleeps = await getSleepCollection(daysAgo(days), today());
+        const sleepsResult = await getSleepCollection(daysAgo(days), today());
+        const { records: sleeps } = sleepsResult;
+
+        const warnings: string[] = sleepsResult.truncated
+          ? ["Sleep data truncated at 50 pages — some history omitted"]
+          : [];
+
         const sleepDays = sleeps.map(mapSleepToDay);
         const computed = computeSleepTrend(sleepDays);
 
+        const structuredContent = {
+          raw: { daily_sleep: sleepDays as unknown as Record<string, unknown>[] },
+          computed,
+          ...(warnings.length > 0 && { warnings }),
+        };
+
         return {
+          structuredContent,
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify({ raw: { daily_sleep: sleepDays }, computed }, null, 2),
+              text: JSON.stringify(structuredContent, null, 2),
             },
           ],
         };

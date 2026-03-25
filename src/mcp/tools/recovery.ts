@@ -12,6 +12,18 @@ export function registerRecoveryTool(server: McpServer): void {
       inputSchema: {
         days: z.number().int().min(7).optional().default(30).describe("Number of days to look back. Minimum 7, default 30."),
       },
+      outputSchema: {
+        raw: z.object({
+          daily_recovery: z.array(z.object({
+            date: z.string(),
+            score: z.number(),
+            hrv_rmssd: z.number(),
+            resting_heart_rate: z.number(),
+          })),
+        }),
+        computed: z.record(z.string(), z.unknown()),
+        warnings: z.array(z.string()).optional(),
+      },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -23,10 +35,18 @@ export function registerRecoveryTool(server: McpServer): void {
       try {
         const start = daysAgo(days);
         const end = today();
-        const [recoveries, cycles] = await Promise.all([
+        const [recoveriesResult, cyclesResult] = await Promise.all([
           getRecoveryCollection(start, end),
           getCycles(start, end),
         ]);
+
+        const { records: recoveries } = recoveriesResult;
+        const { records: cycles } = cyclesResult;
+
+        const warnings: string[] = [
+          recoveriesResult.truncated && "Recovery data truncated at 50 pages — some history omitted",
+          cyclesResult.truncated && "Cycle data truncated at 50 pages — some history omitted",
+        ].filter((w): w is string => typeof w === "string");
 
         const cycleDateMap = new Map(cycles.map((c) => [c.id, c.start.split("T")[0]]));
 
@@ -41,11 +61,18 @@ export function registerRecoveryTool(server: McpServer): void {
 
         const computed = computeRecoveryTrend(recoveries);
 
+        const structuredContent = {
+          raw: { daily_recovery: dailyRecovery },
+          computed,
+          ...(warnings.length > 0 && { warnings }),
+        };
+
         return {
+          structuredContent,
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify({ raw: { daily_recovery: dailyRecovery }, computed }, null, 2),
+              text: JSON.stringify(structuredContent, null, 2),
             },
           ],
         };
