@@ -14,6 +14,23 @@ export function registerWorkoutsTool(server: McpServer): void {
         days: z.number().int().min(1).optional().default(14).describe("Number of days to look back. Minimum 1, default 14."),
         sport: z.string().optional().describe("Filter by sport name (e.g. 'running', 'cycling', 'swimming'). Optional."),
       },
+      outputSchema: {
+        raw: z.object({
+          workouts: z.array(z.record(z.string(), z.unknown())),
+        }),
+        computed: z.object({
+          total_workouts: z.number(),
+          weekly_volume_hrs: z.number(),
+          weekly_strain_total: z.number(),
+          sport_distribution: z.record(z.string(), z.number()),
+          intensity_distribution: z.object({
+            zone1_2_pct: z.number(),
+            zone3_pct: z.number(),
+            zone4_5_pct: z.number(),
+          }),
+        }),
+        warnings: z.array(z.string()).optional(),
+      },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -23,7 +40,12 @@ export function registerWorkoutsTool(server: McpServer): void {
     },
     async ({ days, sport }) => {
       try {
-        const workouts = await getWorkoutCollection(daysAgo(days), today());
+        const workoutsResult = await getWorkoutCollection(daysAgo(days), today());
+        const { records: workouts } = workoutsResult;
+
+        const warnings: string[] = workoutsResult.truncated
+          ? ["Workout data truncated at 50 pages — some history omitted"]
+          : [];
 
         // Map to readable format — filter out unscored workouts
         const mapped = workouts
@@ -86,24 +108,24 @@ export function registerWorkoutsTool(server: McpServer): void {
             }
           : { zone1_2_pct: 0, zone3_pct: 0, zone4_5_pct: 0 };
 
+        const structuredContent = {
+          raw: { workouts: filtered as unknown as Record<string, unknown>[] },
+          computed: {
+            total_workouts: filtered.length,
+            weekly_volume_hrs: weeklyVolumeHrs,
+            weekly_strain_total: weeklyStrainTotal,
+            sport_distribution: sportDist,
+            intensity_distribution: intensityDist,
+          },
+          ...(warnings.length > 0 && { warnings }),
+        };
+
         return {
+          structuredContent,
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify(
-                {
-                  raw: { workouts: filtered },
-                  computed: {
-                    total_workouts: filtered.length,
-                    weekly_volume_hrs: weeklyVolumeHrs,
-                    weekly_strain_total: weeklyStrainTotal,
-                    sport_distribution: sportDist,
-                    intensity_distribution: intensityDist,
-                  },
-                },
-                null,
-                2
-              ),
+              text: JSON.stringify(structuredContent, null, 2),
             },
           ],
         };

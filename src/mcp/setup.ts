@@ -11,10 +11,14 @@ import { registerSleepTool } from "./tools/sleep.js";
 import { registerTrainingLoadTool } from "./tools/training-load.js";
 import { registerWorkoutsTool } from "./tools/workouts.js";
 import { registerRaceReadinessTool } from "./tools/race-readiness.js";
+import logger from "../logger.js";
+
+const log = logger.child({ component: "mcp" });
 
 const MAX_SESSIONS = 10;
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const DRAIN_GRACE_MS = 5_000; // grace period before closing an evicted/timed-out session
 
 interface Session {
   transport: StreamableHTTPServerTransport;
@@ -46,24 +50,36 @@ function isInitializeRequest(body: unknown): boolean {
   return (body as { method?: string })?.method === "initialize";
 }
 
+/**
+ * Drain a session: remove it from the active map immediately (so no new
+ * requests are routed to it), then close transport + server after a grace
+ * period to allow any in-flight requests to complete.
+ */
+function drainSession(id: string, session: Session, sessions: Map<string, Session>): void {
+  sessions.delete(id);
+  setTimeout(() => {
+    void session.transport.close();
+    void session.server.close();
+    log.info({ sessionId: id }, "Session closed after drain");
+  }, DRAIN_GRACE_MS);
+}
+
 export function mountMcp(app: Express, provider: OAuthServerProvider): void {
   const auth = requireBearerAuth({ verifier: provider });
   const sessions = new Map<string, Session>();
 
-  // Evict expired sessions every 5 minutes
+  // Evict timed-out sessions every 5 minutes
   setInterval(() => {
     const now = Date.now();
     for (const [id, session] of sessions) {
       if (now - session.lastActivity > SESSION_TIMEOUT_MS) {
-        console.log(`Session ${id} timed out, closing`);
-        session.transport.close();
-        session.server.close();
-        sessions.delete(id);
+        log.info({ sessionId: id }, "Session timed out — draining");
+        drainSession(id, session, sessions);
       }
     }
   }, CLEANUP_INTERVAL_MS);
 
-  async function evictOldest(): Promise<void> {
+  function evictOldest(): void {
     let oldestId: string | null = null;
     let oldestTime = Infinity;
     for (const [id, session] of sessions) {
@@ -74,10 +90,8 @@ export function mountMcp(app: Express, provider: OAuthServerProvider): void {
     }
     if (oldestId) {
       const old = sessions.get(oldestId)!;
-      console.log(`Evicting oldest session ${oldestId}`);
-      await old.transport.close();
-      await old.server.close();
-      sessions.delete(oldestId);
+      log.info({ sessionId: oldestId }, "Evicting oldest session — draining");
+      drainSession(oldestId, old, sessions);
     }
   }
 
@@ -86,7 +100,7 @@ export function mountMcp(app: Express, provider: OAuthServerProvider): void {
     try {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
     const method = (req.body as { method?: string })?.method ?? (Array.isArray(req.body) ? "batch" : "unknown");
-    console.log(`[mcp] POST /mcp — sessionId=${sessionId?.slice(0, 8) ?? "none"}…, method=${method}, active=${sessions.size}`);
+    log.info({ sessionId: sessionId?.slice(0, 8) ?? "none", method, activeSessions: sessions.size }, "POST /mcp");
 
     // Route to existing session
     if (sessionId && sessions.has(sessionId)) {
@@ -108,7 +122,7 @@ export function mountMcp(app: Express, provider: OAuthServerProvider): void {
 
     // No session ID + not an initialize request → 400
     if (!isInitializeRequest(req.body)) {
-      console.error(`[mcp] REJECTED — sessionId=${sessionId ? `${sessionId.slice(0, 8)}… NOT FOUND` : "missing"}, method=${method} is not initialize`);
+      log.error({ sessionId: sessionId ? `${sessionId.slice(0, 8)}…` : "missing", method }, "REJECTED — not initialize");
       res.status(400).json({
         jsonrpc: "2.0",
         error: {
@@ -120,9 +134,9 @@ export function mountMcp(app: Express, provider: OAuthServerProvider): void {
       return;
     }
 
-    // Enforce session cap with LRU eviction
+    // Enforce session cap with LRU eviction (drains before creating new session)
     if (sessions.size >= MAX_SESSIONS) {
-      await evictOldest();
+      evictOldest();
     }
 
     // Create new session
@@ -148,10 +162,10 @@ export function mountMcp(app: Express, provider: OAuthServerProvider): void {
         server: mcpServer,
         lastActivity: Date.now(),
       });
-      console.log(`New MCP session: ${transport.sessionId} (active: ${sessions.size})`);
+      log.info({ sessionId: transport.sessionId, activeSessions: sessions.size }, "New MCP session");
     }
     } catch (err) {
-      console.error("POST /mcp error:", err);
+      log.error({ err }, "POST /mcp error");
       if (!res.headersSent) {
         res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: String(err) }, id: null });
       }
@@ -170,7 +184,7 @@ export function mountMcp(app: Express, provider: OAuthServerProvider): void {
       session.lastActivity = Date.now();
       await session.transport.handleRequest(req, res);
     } catch (err) {
-      console.error("GET /mcp error:", err);
+      log.error({ err }, "GET /mcp error");
       if (!res.headersSent) {
         res.status(500).json({ error: String(err) });
       }
@@ -188,7 +202,7 @@ export function mountMcp(app: Express, provider: OAuthServerProvider): void {
     await session.transport.close();
     await session.server.close();
     sessions.delete(sessionId);
-    console.log(`Session ${sessionId} closed (active: ${sessions.size})`);
+    log.info({ sessionId, activeSessions: sessions.size }, "Session closed");
     res.status(200).json({ status: "session closed" });
   });
 }
