@@ -15,6 +15,8 @@ const BASE_URL = "https://api.prod.whoop.com/developer";
 
 // --- Private helpers ---
 
+const REQUEST_TIMEOUT_MS = 30_000;
+
 async function fetchWhoop<T>(
   endpoint: string,
   params?: Record<string, string>
@@ -28,11 +30,17 @@ async function fetchWhoop<T>(
   }
 
   console.log(`[whoop-api] ${endpoint} ${params ? JSON.stringify(params) : ""}`);
-  const response = await fetch(url.toString(), {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let response: globalThis.Response;
+  try {
+    response = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     const body = await response.text();
@@ -100,8 +108,14 @@ export async function getBodyMeasurements(): Promise<BodyMeasurement> {
   return data;
 }
 
+// Normalize an ISO timestamp to YYYY-MM-DD for stable, reusable cache keys.
+// daysAgo()/today() embed milliseconds, so raw ISO strings would cause a cache miss on every call.
+function datePart(iso: string): string {
+  return iso.split("T")[0];
+}
+
 export async function getCycles(start: string, end: string): Promise<Cycle[]> {
-  const cacheKey = `cycles:${start}:${end}`;
+  const cacheKey = `cycles:${datePart(start)}:${datePart(end)}`;
   const cached = cache.get(cacheKey);
   if (cached) return cached as Cycle[];
 
@@ -114,7 +128,7 @@ export async function getRecoveryCollection(
   start: string,
   end: string
 ): Promise<Recovery[]> {
-  const cacheKey = `recovery:${start}:${end}`;
+  const cacheKey = `recovery:${datePart(start)}:${datePart(end)}`;
   const cached = cache.get(cacheKey);
   if (cached) return cached as Recovery[];
 
@@ -127,7 +141,7 @@ export async function getSleepCollection(
   start: string,
   end: string
 ): Promise<Sleep[]> {
-  const cacheKey = `sleep:${start}:${end}`;
+  const cacheKey = `sleep:${datePart(start)}:${datePart(end)}`;
   const cached = cache.get(cacheKey);
   if (cached) return cached as Sleep[];
 
@@ -140,7 +154,7 @@ export async function getWorkoutCollection(
   start: string,
   end: string
 ): Promise<Workout[]> {
-  const cacheKey = `workout:${start}:${end}`;
+  const cacheKey = `workout:${datePart(start)}:${datePart(end)}`;
   const cached = cache.get(cacheKey);
   if (cached) return cached as Workout[];
 

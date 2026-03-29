@@ -24,7 +24,7 @@ interface Session {
 
 function createMcpServer(): McpServer {
   const server = new McpServer({
-    name: "whoop-ironman-mcp",
+    name: "whoop-mcp-server",
     version: "1.0.0",
   });
 

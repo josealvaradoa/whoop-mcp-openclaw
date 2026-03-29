@@ -4,39 +4,58 @@ import { daysAgo, today, getRecoveryCollection, getCycles } from "../../whoop/cl
 import { computeRecoveryTrend } from "../../compute/recovery.js";
 
 export function registerRecoveryTool(server: McpServer): void {
-  server.tool(
-    "get_recovery_trend",
-    "Get recovery score trend over a time window. Includes rolling averages, trend direction, and consecutive green/yellow/red day counts.",
-    { days: z.number().optional().default(30).describe("Number of days to look back. Default 30.") },
+  server.registerTool(
+    "whoop_get_recovery_trend",
+    {
+      title: "Recovery Score Trend",
+      description: "Get recovery score trend over a time window. Includes 7-day and 30-day rolling averages, trend direction (improving/stable/declining), and consecutive green/yellow/red day counts.",
+      inputSchema: {
+        days: z.number().int().min(7).optional().default(30).describe("Number of days to look back. Minimum 7, default 30."),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
     async ({ days }) => {
-      const start = daysAgo(days);
-      const end = today();
-      const [recoveries, cycles] = await Promise.all([
-        getRecoveryCollection(start, end),
-        getCycles(start, end),
-      ]);
+      try {
+        const start = daysAgo(days);
+        const end = today();
+        const [recoveries, cycles] = await Promise.all([
+          getRecoveryCollection(start, end),
+          getCycles(start, end),
+        ]);
 
-      const cycleDateMap = new Map(cycles.map((c) => [c.id, c.start.split("T")[0]]));
+        const cycleDateMap = new Map(cycles.map((c) => [c.id, c.start.split("T")[0]]));
 
-      const dailyRecovery = recoveries
-        .filter((r) => cycleDateMap.has(r.cycle_id))
-        .map((r) => ({
-          date: cycleDateMap.get(r.cycle_id)!,
-          score: r.score.recovery_score,
-          hrv_rmssd: r.score.hrv_rmssd_milli,
-          resting_heart_rate: r.score.resting_heart_rate,
-        }));
+        const dailyRecovery = recoveries
+          .filter((r) => cycleDateMap.has(r.cycle_id))
+          .map((r) => ({
+            date: cycleDateMap.get(r.cycle_id)!,
+            score: r.score.recovery_score,
+            hrv_rmssd: r.score.hrv_rmssd_milli,
+            resting_heart_rate: r.score.resting_heart_rate,
+          }));
 
-      const computed = computeRecoveryTrend(recoveries);
+        const computed = computeRecoveryTrend(recoveries);
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({ raw: { daily_recovery: dailyRecovery }, computed }, null, 2),
-          },
-        ],
-      };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ raw: { daily_recovery: dailyRecovery }, computed }, null, 2),
+            },
+          ],
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          isError: true,
+          content: [{ type: "text" as const, text: `Error fetching recovery trend: ${message}` }],
+        };
+      }
     }
   );
 }
