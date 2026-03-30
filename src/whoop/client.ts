@@ -1,4 +1,4 @@
-import { getValidAccessToken } from "./auth.js";
+import { getValidAccessToken, invalidateTokenCache } from "./auth.js";
 import { config } from "../config.js";
 import * as cache from "../db/cache.js";
 import type {
@@ -19,7 +19,8 @@ const REQUEST_TIMEOUT_MS = 30_000;
 
 async function fetchWhoop<T>(
   endpoint: string,
-  params?: Record<string, string>
+  params?: Record<string, string>,
+  isRetry = false,
 ): Promise<T> {
   const accessToken = await getValidAccessToken();
   const url = new URL(`${BASE_URL}${endpoint}`);
@@ -44,6 +45,14 @@ async function fetchWhoop<T>(
 
   if (!response.ok) {
     const body = await response.text();
+
+    // On 401, invalidate cached token and retry once with a fresh token
+    if (response.status === 401 && !isRetry) {
+      console.warn(`[whoop-api] ${endpoint} → 401, refreshing token and retrying…`);
+      invalidateTokenCache();
+      return fetchWhoop<T>(endpoint, params, true);
+    }
+
     console.error(`[whoop-api] ${endpoint} → ${response.status}: ${body.slice(0, 200)}`);
     throw new Error(`Whoop API error ${response.status} on ${endpoint}: ${body}`);
   }

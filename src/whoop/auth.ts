@@ -5,7 +5,7 @@ import type { OAuthTokenResponse } from "./types.js";
 
 const WHOOP_TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token";
 const WHOOP_AUTH_URL = "https://api.prod.whoop.com/oauth/oauth2/auth";
-const SCOPES = "read:recovery read:cycles read:sleep read:workout read:profile read:body_measurement";
+const SCOPES = "read:recovery read:cycles read:sleep read:workout read:profile read:body_measurement offline";
 
 // In-memory token cache to avoid PBKDF2 on every call
 let cachedAccessToken: string | null = null;
@@ -151,6 +151,7 @@ async function doRefreshAccessToken(): Promise<string> {
         refresh_token: tokens.refreshToken,
         client_id: config.whoop.clientId,
         client_secret: config.whoop.clientSecret,
+        scope: "offline",
       }),
     });
   } catch (networkErr) {
@@ -186,6 +187,11 @@ async function doRefreshAccessToken(): Promise<string> {
   console.log(`[whoop-auth] Token refresh succeeded — expires_in=${data.expires_in}s`);
   storeTokens(data.access_token, data.refresh_token, data.expires_in, data.scope);
   return data.access_token;
+}
+
+export function invalidateTokenCache(): void {
+  cachedAccessToken = null;
+  cachedExpiresAt = null;
 }
 
 export async function getValidAccessToken(): Promise<string> {
